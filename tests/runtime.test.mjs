@@ -258,7 +258,7 @@ test('controller login fails closed when its configuration is missing or weak', 
 async function startFakeServer(t, adminKey) {
   const seen = [];
   // Controller state the fake keeps: the session revocation time, and whether sign-in is locked.
-  const state = { revokedBefore: null, locked: false };
+  const state = { revokedBefore: null, locked: false, failEpoch: false, failRevoke: false };
   const notification = {
     id: '3f0a1c9e-6c1b-4a41-9a0f-6d2f0e7b1a11', type: 'maintenance', subject: 'Contract test subject', description: 'From the fake Server',
     priority: 'high', status: 'active', action: null, action_url: null, icon: null, target_audience: 'all',
@@ -282,8 +282,11 @@ async function startFakeServer(t, adminKey) {
       case 'POST /api/admin/notifications': return send(200, { row: { ...notification, id: 'created' }, audience_size: 7 });
       case 'PATCH /api/admin/notifications': return send(200, { row: { ...notification, status: 'resolved' } });
       case 'DELETE /api/admin/notifications': return send(200, { ok: true });
-      case 'GET /api/admin/controller/session-epoch': return send(200, { revoked_before: state.revokedBefore });
+      case 'GET /api/admin/controller/session-epoch':
+        if (state.failEpoch) return send(503, { error: 'epoch_unavailable' });
+        return send(200, { revoked_before: state.revokedBefore });
       case 'POST /api/admin/controller/session-epoch':
+        if (state.failRevoke) return send(503, { error: 'revocation_unavailable' });
         state.revokedBefore = Math.max(state.revokedBefore ?? 0, JSON.parse(raw).revoked_before);
         return send(200, { revoked_before: state.revokedBefore });
       case 'POST /api/admin/controller/login-attempts':
@@ -411,7 +414,52 @@ test('Community calls the Server admin and public contract exactly as the Server
     // A session made while the Server was up still gets only errors, never success, during an outage.
     const stamp = String(Date.now());
     const cookie = { cookie: `${COOKIE}=${stamp}.${sign(stamp)}` };
-    assert.equal((await down.request('/api/controller/stats', { headers: cookie })).status, 500);
+    assert.equal((await down.request('/api/controller/stats', { headers: cookie })).status, 401);
     assert.equal((await down.request('/updates')).status, 200, 'the public page degrades instead of failing');
   });
+});
+
+
+test('revocation lookup failure cannot authorize a copied cookie', { timeout: 30000 }, async (t) => {
+  const KEY = 'isolated-revocation-test-key-000000';
+  const fake = await startFakeServer(t, KEY);
+  fake.state.revokedBefore = Date.now();
+  fake.state.failEpoch = true;
+  const { request } = await startCommunity(t, { ATOMIC_SERVER_URL: fake.url, ADMIN_API_KEY: KEY });
+  const stamp = String(Date.now() - 1000);
+  const headers = { cookie: `${COOKIE}=${stamp}.${sign(stamp)}` };
+  const result = await request('/api/controller/stats', { headers });
+  assert.equal(result.status, 401);
+  assert.equal(fake.seen.some((call) => call.path === '/api/admin/stats'), false,
+    'protected request must stop before the reachable downstream admin route');
+});
+
+test('expired revocation cache cannot authorize during an epoch outage', { timeout: 30000 }, async (t) => {
+  const KEY = 'isolated-epoch-cache-test-key-00000';
+  const fake = await startFakeServer(t, KEY);
+  const { request } = await startCommunity(t, { ATOMIC_SERVER_URL: fake.url, ADMIN_API_KEY: KEY });
+  const headers = await adminCookie({ request });
+  assert.equal((await request('/api/controller/stats', { headers })).status, 200);
+  fake.state.revokedBefore = Date.now();
+  fake.state.failEpoch = true;
+  await delay(5100);
+  const calls = fake.seen.filter((call) => call.path === '/api/admin/stats').length;
+  assert.equal((await request('/api/controller/stats', { headers })).status, 401);
+  assert.equal(fake.seen.filter((call) => call.path === '/api/admin/stats').length, calls);
+  fake.state.failEpoch = false;
+  assert.equal((await request('/api/controller/stats', { headers })).status, 401,
+    'recovery must observe the revocation, not restore the stale cache');
+});
+
+test('failed global logout explicitly reports only local cookie removal', { timeout: 30000 }, async (t) => {
+  const KEY = 'isolated-revoke-failure-test-key-00';
+  const fake = await startFakeServer(t, KEY);
+  const { request } = await startCommunity(t, { ATOMIC_SERVER_URL: fake.url, ADMIN_API_KEY: KEY });
+  const headers = await adminCookie({ request });
+  fake.state.failRevoke = true;
+  const response = await request('/api/controller/logout', { method: 'POST', headers });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, revoked: false });
+  assert.match(response.headers.get('set-cookie'), /Max-Age=0/i);
+  assert.equal(fake.state.revokedBefore, null);
 });

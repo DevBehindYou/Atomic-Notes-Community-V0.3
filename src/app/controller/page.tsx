@@ -46,6 +46,7 @@ type Tab = "overview" | "notifications" | "economy" | "health";
 export default function ControllerPage() {
   const [checking, setChecking] = useState(true);
   const [admin, setAdmin] = useState(false);
+  const [logoutNotice, setLogoutNotice] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/controller/session")
@@ -62,7 +63,10 @@ export default function ControllerPage() {
       </Shell>
     );
   }
-  return admin ? <Dashboard onLogout={() => setAdmin(false)} /> : <Login onIn={() => setAdmin(true)} />;
+  return admin ? <Dashboard onLogout={(notice) => {
+    setLogoutNotice(notice ?? null);
+    setAdmin(false);
+  }} /> : <Login notice={logoutNotice} onIn={() => { setLogoutNotice(null); setAdmin(true); }} />;
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -75,7 +79,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Login({ onIn }: { onIn: () => void }) {
+function Login({ onIn, notice }: { onIn: () => void; notice: string | null }) {
   const [step, setStep] = useState<1 | 2>(1);
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
@@ -121,6 +125,7 @@ function Login({ onIn }: { onIn: () => void }) {
 
   return (
     <Shell>
+      {notice && <p role="alert">{notice}</p>}
       <h1 style={{ fontSize: "2.4rem" }}>Restricted.</h1>
       <p style={{ color: "var(--slate)", marginTop: 8 }}>
         {step === 1 ? "Enter the first key." : "Enter the second key."}
@@ -168,7 +173,7 @@ function Login({ onIn }: { onIn: () => void }) {
   );
 }
 
-function Dashboard({ onLogout }: { onLogout: () => void }) {
+function Dashboard({ onLogout }: { onLogout: (notice?: string) => void }) {
   const [tab, setTab] = useState<Tab>("overview");
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
@@ -210,8 +215,15 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   }, [loadStats, loadRows]);
 
   async function logout() {
-    await fetch("/api/controller/logout", { method: "POST" });
-    onLogout();
+    try {
+      const response = await fetch("/api/controller/logout", { method: "POST" });
+      if (!response.ok) throw new Error("logout_failed");
+      const result = await response.json();
+      onLogout(result.revoked === true ? undefined
+        : "Signed out of this browser. Other Controller sessions could not be revoked. Sign in and retry Log out everywhere when the Server is reachable.");
+    } catch {
+      setMsg("Could not confirm logout. Please retry; other sessions may still be active.");
+    }
   }
 
   return (
