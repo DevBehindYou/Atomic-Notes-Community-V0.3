@@ -1,0 +1,14 @@
+{
+  "categories": [
+    { "slug": "development", "name": "Development", "description": "How Atomic Notes is built." },
+    { "slug": "releases", "name": "Releases", "description": "Release notes and demo builds." },
+    { "slug": "privacy", "name": "Privacy", "description": "No ads, no trackers, no reading your notes." },
+    { "slug": "security", "name": "Security", "description": "Encryption, auth, and data protection." },
+    { "slug": "local-first", "name": "Local First", "description": "Offline-first, device-first architecture." },
+    { "slug": "open-source", "name": "Open Source", "description": "Building in the open." },
+    { "slug": "engineering", "name": "Engineering", "description": "Flutter, Supabase, sync, and internals." },
+    { "slug": "atomic-energy", "name": "Atomic Energy", "description": "The renewable-resource sync economy." },
+    { "slug": "community", "name": "Community", "description": "Updates for and from the community." },
+    { "slug": "announcements", "name": "Announcements", "description": "Milestones and news." }
+  ]
+}

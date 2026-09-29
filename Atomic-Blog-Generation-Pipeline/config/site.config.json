@@ -1,0 +1,32 @@
+{
+  "site": {
+    "name": "Atomic Notes",
+    "brand": "DevBehindYou",
+    "baseUrl": "https://atomic-notes-community.vercel.app",
+    "blogBasePath": "/blog",
+    "contentDir": "../content/blog",
+    "publicImageDir": "../public/blog"
+  },
+  "design": {
+    "ink": "#15171B",
+    "paper": "#F4F5F1",
+    "signal": "#3A2FF0",
+    "fonts": { "display": "Bebas Neue", "body": "Hanken Grotesk", "mono": "JetBrains Mono" },
+    "system": "Technical Editorial"
+  },
+  "defaults": {
+    "author": "ashutosh-sharma",
+    "draft": true,
+    "featured": false,
+    "wordTarget": [1200, 2000],
+    "readingWpm": 220,
+    "ogImageFallback": "/og-banner.png"
+  },
+  "seo": {
+    "titleMaxChars": 60,
+    "descriptionRange": [140, 160],
+    "structuredDataType": "BlogPosting",
+    "twitterCard": "summary_large_image",
+    "crawlers": ["Googlebot", "GPTBot", "ClaudeBot", "PerplexityBot", "Google-Extended"]
+  }
+}

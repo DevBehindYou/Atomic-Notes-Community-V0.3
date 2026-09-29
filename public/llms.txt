@@ -1,0 +1,25 @@
+# Atomic Notes
+
+> Atomic Notes is a free, local-first notes app for Android. Notes live on the phone first and sync to a private My-Atomic-Notes folder in the user's own Google Drive. An optional vault encrypts every note on the device with AES-256-GCM (key derived from a 6-word recovery phrase with Argon2id), so the sync server and Google store only ciphertext. The app has no AI features, no ads and no analytics. Current version: 2.03.5, released 2026-09-28. Android 9 or newer. The source code is public to read and verify, but proprietary (Atomic Notes Source-Available License, all rights reserved). It is not open source. Built by Ashutosh Sharma (DevBehindYou).
+
+Key facts:
+
+- Storage: on-device first (Hive). Sync writes one .atomic file per note to the user's Google Drive, using the drive.file scope (the app sees only files it created).
+- Server: stores metadata only (note ids, pinned and deleted flags, timestamps, Drive file ids). It never stores note titles or text. With the vault off, note text passes through it in transit to Drive.
+- Price: free. Every account holds 30 notes. Cloud sync uses Atomic Energy: +20 every 24 hours, cap 120, standard sync 5 (at most once an hour), instant sync 10, syncs with nothing to upload are free. 1 Atomic Coin = 40 energy. New accounts get 5 coins. Coins are not sold in the app yet. Early supporters on Patreon (https://www.patreon.com/cw/DevBehindYou) who send their account email get Atomic Coins from the developer by hand.
+- Capacity tiers: Tachyon 30 notes (free), Antimatter 40 (10 coins), Monopole 50 (20 coins), Strangelet 100 (30 coins).
+- Device security: biometric lock, TOTP two-step verification, blocked screenshots (FLAG_SECURE), Android secure storage.
+- Distribution: signed APKs on GitHub Releases. Certificate SHA-256 cc24ae5ce1dca50fcd5e5c4c252d69e4965c55a975bd0e4739e8938fad9bebeb. Not on Google Play. No iOS build yet.
+
+## Main pages
+
+- [Home](https://atomic-notes-community.vercel.app/): features, how sync works, what each party can see, Atomic Energy, FAQ
+- [Updates](https://atomic-notes-community.vercel.app/updates): live release notes and service status
+- [Blog](https://atomic-notes-community.vercel.app/blog): development updates and technical write-ups
+- [Support](https://atomic-notes-community.vercel.app/support-atomic-notes): support on Patreon and get Atomic Coins early
+
+## Source and downloads
+
+- [Source code (GitHub)](https://github.com/DevBehindYou/Atomic-Notes-App-V0.2): Flutter app, source-available (read and verify only)
+- [Latest release](https://github.com/DevBehindYou/Atomic-Notes-App-V0.2/releases/latest): APKs with SHA-256 checksums
+- [Transparency](https://github.com/DevBehindYou/Atomic-Notes-App-V0.2/blob/main/TRANSPARENCY.md): what the app collects and what is protected

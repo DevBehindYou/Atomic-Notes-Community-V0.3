@@ -1,0 +1,14 @@
+{
+  "note": "Real authors only. Never invent a byline. If a piece has no real named author, use the brand author below.",
+  "authors": [
+    {
+      "id": "ashutosh-sharma",
+      "name": "Ashutosh Sharma",
+      "role": "Founder & Solo Developer, Atomic Notes",
+      "brand": "DevBehindYou",
+      "bio": "Solo developer building Atomic Notes, a local-first, privacy-first notes app. Writes about local-first software, encryption, Flutter, and Supabase from first-hand build experience.",
+      "url": "https://devbehindyou.vercel.app",
+      "avatar": "/authors/ashutosh-sharma.png"
+    }
+  ]
+}
