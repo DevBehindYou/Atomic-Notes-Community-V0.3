@@ -50,16 +50,17 @@ export function rememberRevokedBefore(value: number | null): void {
   epochCache = { value, at: Date.now() };
 }
 
-async function revokedBefore(): Promise<number | null> {
+async function revokedBefore(): Promise<number | null | undefined> {
   if (!isAtomicServerConfigured()) return null;
   if (epochCache && Date.now() - epochCache.at < EPOCH_CACHE_MS) return epochCache.value;
   try {
     rememberRevokedBefore((await atomicAdmin.sessionEpoch()).revoked_before);
     return epochCache!.value;
   } catch {
-    // Server unreachable: every admin action goes through that same Server, so a revoked session
-    // still cannot read or change anything; only the empty dashboard would render.
-    return null;
+    // Unknown is different from an authoritative "no revocations" (null).
+    // A partial outage may leave the mutation routes reachable. Fail closed,
+    // and never extend the lifetime of an expired cache entry after an error.
+    return undefined;
   }
 }
 
@@ -68,7 +69,7 @@ export async function isAdmin(): Promise<boolean> {
   const token = (await cookies()).get(ADMIN_COOKIE)?.value;
   if (!token || !tokenValid(token)) return false;
   const before = await revokedBefore();
-  return before === null || tokenIssuedAt(token) > before;
+  return before !== undefined && (before === null || tokenIssuedAt(token) > before);
 }
 
 function constEq(input: string | undefined | null, expected: string | undefined): boolean {
