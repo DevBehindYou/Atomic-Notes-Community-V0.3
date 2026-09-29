@@ -1,0 +1,13 @@
+{
+  "name": "atomic-blog-generation-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Developer tool for generating accurate, SEO-ready Atomic Notes blog articles. Separate from the app runtime.",
+  "scripts": {
+    "slug": "node scripts/slug.mjs",
+    "metadata": "node scripts/metadata.mjs",
+    "validate": "node scripts/validate.mjs",
+    "links": "node scripts/internal-links.mjs"
+  }
+}

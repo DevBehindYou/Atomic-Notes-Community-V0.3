@@ -1,0 +1,3 @@
+# The blog-generation pipeline is a local authoring tool, not part of the
+# deployed website. Keep it in the repo (versioned) but out of the Vercel build.
+Atomic-Blog-Generation-Pipeline

@@ -1,0 +1,38 @@
+{
+  "name": "atomic-community-base",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Atomic Notes community platform + secret Atomic-Controller admin panel.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test:smoke": "node --test tests/runtime.test.mjs"
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "marked": "^18.0.11",
+    "next": "15.5.24",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.5",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.2"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "$postcss"
+    }
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}
