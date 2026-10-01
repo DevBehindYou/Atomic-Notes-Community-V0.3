@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { NOTIFICATION_TYPES, PRIORITIES } from "@/lib/content";
 
 type Row = {
@@ -563,6 +563,13 @@ function NotifRow({ n, onChanged, onMsg }: { n: Row; onChanged: () => void; onMs
   );
 }
 
+type CoinDetails = {
+  enabled: boolean; non_expiring_coins: number; next_expiry_coins: number; next_expiry_at: string | null;
+  next_cursor: string | null; server_time: string;
+  rows: { id: string; source: string; amount: number; remaining: number; credited_at: string; expires_at: string | null }[];
+};
+type Adjustment = { request_id: string; user_id: string; coins_delta: number; energy_delta: number; note?: string };
+const PENDING_ADJUSTMENT = "atomic-controller-pending-adjustment-v1";
 type FoundUser = {
   user_id: string;
   email: string;
@@ -575,6 +582,7 @@ type FoundUser = {
   energy: number;
   energy_cap: number;
   last_daily_grant_at: string | null;
+  coin_details?: CoinDetails | null;
 };
 
 function fmtDate(d: string | null | undefined): string {
@@ -596,8 +604,63 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
   const [note, setNote] = useState("");
   const [looking, setLooking] = useState(false);
   const [busy, setBusy] = useState(false);
+  const applying = useRef(false);
+  const [pending, setPending] = useState<Adjustment | null>(null);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(PENDING_ADJUSTMENT);
+      if (saved) setPending(JSON.parse(saved) as Adjustment);
+    } catch { onMsg("Saved adjustment could not be read. Resolve browser storage before issuing credits."); }
+  }, [onMsg]);
+
+  async function submit(payload: Adjustment) {
+    if (applying.current) return;
+    applying.current = true; setBusy(true);
+    try {
+      // A persisted ID must exist before any request. Failure to persist stops the mutation.
+      localStorage.setItem(PENDING_ADJUSTMENT, JSON.stringify(payload));
+      setPending(payload);
+      const r = await fetch("/api/controller/energy", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        if (r.status === 400) { localStorage.removeItem(PENDING_ADJUSTMENT); setPending(null); }
+        throw new Error(d.error || "failed");
+      }
+      localStorage.removeItem(PENDING_ADJUSTMENT); setPending(null);
+      setCoins("0"); setEnergy("0"); setNote("");
+      // Saved operation results can be historical; refresh current balances before displaying them.
+      if (found?.user_id === payload.user_id) {
+        try {
+          const fresh = await fetch(`/api/controller/user?email=${encodeURIComponent(found.email)}`);
+          const refreshed: FoundUser | null = fresh.ok ? await fresh.json() : null;
+          setFound((current) => current?.user_id === payload.user_id ? refreshed : current);
+        } catch { setFound((current) => current?.user_id === payload.user_id ? null : current); }
+      }
+      onMsg("Balance adjusted."); onDone();
+    } catch (e) {
+      onMsg(`${e instanceof Error ? e.message : "Failed to adjust."} Retry the saved adjustment to confirm its outcome.`);
+    } finally { applying.current = false; setBusy(false); }
+  }
+
+  async function moreBatches() {
+    if (!found?.coin_details?.next_cursor || busy) return;
+    const target = found;
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/controller/coins?user_id=${encodeURIComponent(target.user_id)}&cursor=${encodeURIComponent(target.coin_details!.next_cursor!)}`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Could not load batches");
+      setFound((current) => current?.user_id === target.user_id ? { ...current, coin_details: {
+        ...d, rows: [...current.coin_details!.rows, ...d.rows.filter((row: { id: string }) => !current.coin_details!.rows.some((old) => old.id === row.id))],
+      } } : current);
+    } catch (e) { onMsg(e instanceof Error ? e.message : "Could not load batches"); }
+    finally { setBusy(false); }
+  }
 
   async function lookup() {
+    if (busy || applying.current) return;
     if (!email.trim()) return onMsg("Enter an email to look up.");
     setLooking(true);
     setFound(null);
@@ -621,42 +684,29 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
     if (!Number.isInteger(coinsDelta) || !Number.isInteger(energyDelta)) {
       return onMsg("Deltas must be whole numbers.");
     }
+    if (Math.abs(coinsDelta) > 100000 || Math.abs(energyDelta) > 100000) return onMsg("Each adjustment must be between -100000 and 100000.");
     if (coinsDelta === 0 && energyDelta === 0) return onMsg("Nothing to adjust.");
     // This changes a real wallet: say exactly what will happen first.
     const plan = [coinsDelta && `${coinsDelta > 0 ? "+" : ""}${coinsDelta} coins`, energyDelta && `${energyDelta > 0 ? "+" : ""}${energyDelta} energy`]
       .filter(Boolean)
       .join(" and ");
     if (!window.confirm(`Apply ${plan} to ${found.email}? Energy stops at ${found.energy_cap}, coins at 0.`)) return;
-    setBusy(true);
     try {
-      const r = await fetch("/api/controller/energy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: found.user_id,
-          coins_delta: coinsDelta,
-          energy_delta: energyDelta,
-          ...(note.trim() ? { note: note.trim() } : {}),
-        }),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "failed");
-      setFound({ ...found, coins: d.coins, energy: d.energy, has_wallet: true });
-      setCoins("0");
-      setEnergy("0");
-      setNote("");
-      onMsg("Balance adjusted.");
-      onDone();
-    } catch (e) {
-      onMsg(e instanceof Error ? e.message : "Failed to adjust.");
-    } finally {
-      setBusy(false);
-    }
+      const saved = localStorage.getItem(PENDING_ADJUSTMENT);
+      if (saved) { setPending(JSON.parse(saved) as Adjustment); return onMsg("Resolve the saved adjustment before starting another."); }
+      await submit({ request_id: crypto.randomUUID(), user_id: found.user_id,
+        coins_delta: coinsDelta, energy_delta: energyDelta, ...(note.trim() ? { note: note.trim() } : {}) });
+    } catch { onMsg("Browser storage is unavailable. No adjustment sent."); }
   }
 
   return (
     <section className="module" style={{ marginTop: 14 }}>
       <p className="num">USER LOOKUP · ADJUST</p>
+      {pending && <div role="status" className="module" style={{ marginTop: 12, overflowWrap: "anywhere" }}>
+        <p>Unconfirmed adjustment for account {pending.user_id}: {pending.coins_delta} coins, {pending.energy_delta} energy.
+          Retry this saved request before starting another; it may already have succeeded.</p>
+        <button className="btn" disabled={busy} onClick={() => submit(pending)}>Retry saved adjustment</button>
+      </div>}
       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
         <input
           value={email}
@@ -668,7 +718,7 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
           className={inputCls}
           style={{ flex: 1, minWidth: 200 }}
         />
-        <button onClick={lookup} disabled={looking} className="btn">
+        <button onClick={lookup} disabled={looking || busy} className="btn">
           {looking ? "…" : "Look up"}
         </button>
       </div>
@@ -706,6 +756,20 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
             </div>
           </div>
 
+          {found.coin_details?.enabled && <div className="module" style={{ marginTop: 12 }}>
+            <p className="num">COIN EXPIRY</p>
+            <p>{found.coin_details.non_expiring_coins} coins never expire.</p>
+            {found.coin_details.next_expiry_at && <p>{found.coin_details.next_expiry_coins} coins next expire {fmtDate(found.coin_details.next_expiry_at)} (local time).</p>}
+            <p>New credits expire six calendar months after Server credit time. Earliest expiry is spent first; old balances remain non-expiring.</p>
+            <p>Last checked {fmtDate(found.coin_details.server_time)}. Refresh lookup for current balances.</p>
+            <details><summary>Credit batches</summary>
+              {found.coin_details.rows.map((batch) => <div key={batch.id} style={{ borderTop: "1px solid var(--slate)", padding: "10px 0" }}>
+                <p>{batch.remaining} of {batch.amount} coins remaining · {batch.source}</p>
+                <p>Credited {fmtDate(batch.credited_at)}<br />{batch.expires_at ? `Expiry ${fmtDate(batch.expires_at)}` : "Never expires"} (local time)</p>
+              </div>)}
+              {found.coin_details.next_cursor && <button className="btn" onClick={moreBatches} disabled={busy}>Load more batches</button>}
+            </details>
+          </div>}
           <div className="grid g2" style={{ marginTop: 12 }}>
             <label>
               <span className="mono-label">Coins delta (+/-)</span>
@@ -726,7 +790,7 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
               className={inputCls}
             />
           </label>
-          <button onClick={apply} disabled={busy} className="btn-signal" style={{ marginTop: 14 }}>
+          <button onClick={apply} disabled={busy || pending !== null} className="btn-signal" style={{ marginTop: 14 }}>
             {busy ? "Applying…" : "Apply adjustment"}
           </button>
         </>

@@ -54,11 +54,13 @@ async function request<T>(
 }
 
 export const atomicAdmin = {
-  health: () => request<{ db: boolean; dbError: string | null; time: string }>("/health"),
+  health: () => request<{ db: boolean; dbError: string | null; time: string; coin_request_replay?: boolean }>("/health"),
   stats: () => request<{ stats: Record<string, unknown> }>("/stats"),
   user: (email: string) =>
     request<Record<string, unknown>>(`/user?email=${encodeURIComponent(email)}`),
+  coinBatches: (userId: string, cursor?: string) => request<Record<string, unknown>>(`/coins?user_id=${encodeURIComponent(userId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   adjustEnergy: (body: {
+    request_id?: string;
     email?: string;
     user_id?: string;
     coins_delta?: number;
