@@ -85,7 +85,7 @@ test('production routes preserve authentication and public content', { timeout: 
 
   await t.test('every admin operation rejects an anonymous request', async () => {
     for (const [route, method] of [
-      ['health', 'GET'], ['stats', 'GET'], ['user', 'GET'], ['energy', 'POST'],
+      ['health', 'GET'], ['stats', 'GET'], ['user', 'GET'], ['energy', 'POST'], ['coins', 'GET'],
       ['notifications', 'GET'], ['notifications', 'POST'],
       ['notifications', 'PATCH'], ['notifications', 'DELETE'],
     ]) {
@@ -258,7 +258,7 @@ test('controller login fails closed when its configuration is missing or weak', 
 async function startFakeServer(t, adminKey) {
   const seen = [];
   // Controller state the fake keeps: the session revocation time, and whether sign-in is locked.
-  const state = { revokedBefore: null, locked: false, failEpoch: false, failRevoke: false };
+  const state = { revokedBefore: null, locked: false, failEpoch: false, failRevoke: false, coinReplay: true };
   const notification = {
     id: '3f0a1c9e-6c1b-4a41-9a0f-6d2f0e7b1a11', type: 'maintenance', subject: 'Contract test subject', description: 'From the fake Server',
     priority: 'high', status: 'active', action: null, action_url: null, icon: null, target_audience: 'all',
@@ -274,9 +274,10 @@ async function startFakeServer(t, adminKey) {
     if (url.pathname === '/api/public/notifications/active') return send(200, { rows: [notification] });
     if (req.headers['x-admin-api-key'] !== adminKey) return send(401, { error: 'unauthorized' });
     switch (`${req.method} ${url.pathname}`) {
-      case 'GET /api/admin/health': return send(200, { db: true, dbError: null, configuration: [], time: 'now' });
+      case 'GET /api/admin/health': return send(200, { coin_request_replay: state.coinReplay, db: true, dbError: null, configuration: [], time: 'now' });
       case 'GET /api/admin/stats': return send(200, { stats: { users: 3 } });
       case 'GET /api/admin/user': return send(200, { user_id: 'u1', email: url.searchParams.get('email'), coins: 5, energy: 20, energy_cap: 120 });
+      case 'GET /api/admin/coins': return send(200, { enabled: true, rows: [], next_cursor: null });
       case 'POST /api/admin/energy': return send(200, { ok: true, user_id: 'u1', coins: 6, energy: 30 });
       case 'GET /api/admin/notifications': return send(200, { rows: [notification] });
       case 'POST /api/admin/notifications': return send(200, { row: { ...notification, id: 'created' }, audience_size: 7 });
@@ -325,9 +326,13 @@ test('Community calls the Server admin and public contract exactly as the Server
     assert.equal(user.email, 'a+b@example.com');
     assert.deepEqual([last().path, last().query.email], ['/api/admin/user', 'a+b@example.com']);
 
-    const energy = await post('/api/controller/energy', { email: 'a@example.com', coins_delta: '1', energy_delta: 10, note: 'test' });
+    const batches = await request('/api/controller/coins?user_id=u1&cursor=opaque%2Bcursor', { headers });
+    assert.equal(batches.status, 200);
+    assert.deepEqual([last().path, last().query], ['/api/admin/coins', { user_id: 'u1', cursor: 'opaque+cursor' }]);
+
+    const energy = await post('/api/controller/energy', { email: 'a@example.com', coins_delta: '1', energy_delta: 10, note: 'test', request_id: '5c4f1ecc-0a9a-4f86-825b-5fdd7870e310' });
     assert.equal(energy.status, 200);
-    assert.deepEqual(last().body, { email: 'a@example.com', coins_delta: 1, energy_delta: 10, note: 'test' });
+    assert.deepEqual(last().body, { email: 'a@example.com', coins_delta: 1, energy_delta: 10, note: 'test', request_id: '5c4f1ecc-0a9a-4f86-825b-5fdd7870e310' });
     assert.equal(last().contentType, 'application/json');
 
     assert.equal((await request('/api/controller/notifications', { headers })).status, 200);
@@ -342,6 +347,17 @@ test('Community calls the Server admin and public contract exactly as the Server
     assert.equal((await request('/api/controller/notifications?id=a%20b', { method: 'DELETE', headers })).status, 200);
     assert.deepEqual([last().method, last().query.id], ['DELETE', 'a b']);
     assert.ok(fake.seen.filter((call) => call.path.startsWith('/api/admin/')).every((call) => call.key === KEY));
+  });
+
+  await t.test('older Servers and missing request IDs cannot receive unsafe coin adjustments', async () => {
+    const count = () => fake.seen.filter((call) => call.path === '/api/admin/energy').length;
+    const before = count();
+    assert.equal((await post('/api/controller/energy', { user_id: 'u1', coins_delta: 1 })).status, 400);
+    fake.state.coinReplay = false;
+    try {
+      assert.equal((await post('/api/controller/energy', { user_id: 'u1', coins_delta: 1, request_id: '5c4f1ecc-0a9a-4f86-825b-5fdd7870e310' })).status, 409);
+      assert.equal(count(), before);
+    } finally { fake.state.coinReplay = true; }
   });
 
   await t.test('invalid controller input never reaches the Server', async () => {
