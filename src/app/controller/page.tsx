@@ -178,6 +178,11 @@ function Dashboard({ onLogout }: { onLogout: (notice?: string) => void }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [rowsLoading, setRowsLoading] = useState(true);
+  const [rowsError, setRowsError] = useState<string | null>(null);
+  const [retryCursor, setRetryCursor] = useState<string | undefined>();
+  const rowsRequest = useRef(0);
   const [msg, setMsg] = useState<string | null>(null);
 
   // A 401 means this session was ended (Log out on another browser): back to the login screen.
@@ -187,6 +192,7 @@ function Dashboard({ onLogout }: { onLogout: (notice?: string) => void }) {
       onLogout();
       throw new Error("signed out");
     }
+    if (!r.ok) throw new Error("request_failed");
     return r.json();
   }, [onLogout]);
 
@@ -200,18 +206,33 @@ function Dashboard({ onLogout }: { onLogout: (notice?: string) => void }) {
     }
   }, [get]);
 
-  const loadRows = useCallback(async () => {
+  const loadRows = useCallback(async (cursor?: string) => {
+    const request = ++rowsRequest.current;
+    setRowsLoading(true);
+    setRowsError(null);
     try {
-      const d = await get("/api/controller/notifications");
-      setRows(d.rows ?? []);
+      const d = await get(`/api/controller/notifications?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      if (request !== rowsRequest.current) return;
+      if (!Array.isArray(d.rows) || (cursor && d.next_cursor === cursor)) throw new Error("invalid_page");
+      setRows((previous) => {
+        if (!cursor) return d.rows;
+        const known = new Set(previous.map((row) => row.id));
+        return [...previous, ...d.rows.filter((row: Row) => !known.has(row.id))];
+      });
+      setNextCursor(typeof d.next_cursor === "string" ? d.next_cursor : null);
     } catch {
-      setMsg("Could not load notifications.");
+      if (request !== rowsRequest.current) return;
+      setRetryCursor(cursor);
+      setRowsError("Could not load notifications. Retry this request.");
+    } finally {
+      if (request === rowsRequest.current) setRowsLoading(false);
     }
   }, [get]);
 
   useEffect(() => {
     loadStats();
     loadRows();
+    return () => { rowsRequest.current++; };
   }, [loadStats, loadRows]);
 
   async function logout() {
@@ -253,7 +274,10 @@ function Dashboard({ onLogout }: { onLogout: (notice?: string) => void }) {
       {tab === "notifications" && (
         <>
           <NewNotification onCreated={loadRows} onMsg={setMsg} />
-          <NotifList rows={rows} onChanged={loadRows} onMsg={setMsg} />
+          <NotifList rows={rows} onChanged={() => loadRows()} onMsg={setMsg}
+            loading={rowsLoading} error={rowsError} nextCursor={nextCursor}
+            onMore={() => { if (nextCursor) void loadRows(nextCursor); }}
+            onRetry={() => { void loadRows(retryCursor); }} />
         </>
       )}
       {tab === "economy" && <Economy stats={stats} onMsg={setMsg} onDone={loadStats} />}
@@ -513,17 +537,30 @@ function NewNotification({
   );
 }
 
-function NotifList({ rows, onChanged, onMsg }: { rows: Row[]; onChanged: () => void; onMsg: (m: string) => void }) {
+function NotifList({ rows, onChanged, onMsg, loading, error, nextCursor, onMore, onRetry }: {
+  rows: Row[]; onChanged: () => void; onMsg: (m: string) => void;
+  loading: boolean; error: string | null; nextCursor: string | null;
+  onMore: () => void; onRetry: () => void;
+}) {
   return (
     <section>
       <p className="num">ALL NOTIFICATIONS</p>
       <div className="hairline" style={{ margin: "8px 0 12px" }} />
-      {rows.length === 0 && <p style={{ color: "var(--slate)" }}>None yet.</p>}
+      <p className="mono-label" aria-live="polite">{rows.length} notifications loaded</p>
+      {loading && <p role="status">Loading notifications…</p>}
+      {error && <div role="alert" style={{ marginTop: 12 }}>
+        <p style={{ color: "var(--error)" }}>{error}</p>
+        <button onClick={onRetry} disabled={loading} className="btn-ghost">Retry</button>
+      </div>}
+      {!loading && !error && rows.length === 0 && <p style={{ color: "var(--slate)" }}>None yet.</p>}
       <div style={{ display: "grid", gap: 10 }}>
         {rows.map((n) => (
           <NotifRow key={n.id} n={n} onChanged={onChanged} onMsg={onMsg} />
         ))}
       </div>
+      {nextCursor && <button onClick={onMore} disabled={loading} className="btn-ghost" style={{ marginTop: 14 }}>
+        {loading ? "Loading…" : "Load more"}
+      </button>}
     </section>
   );
 }
