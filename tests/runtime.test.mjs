@@ -83,6 +83,28 @@ async function adminCookie({ request }) {
 test('production routes preserve authentication and public content', { timeout: 90000 }, async (t) => {
   const { base, request } = await startCommunity(t);
 
+  for (const path of ['/', '/support-atomic-notes', '/blog', '/updates', '/controller', '/api/controller/session']) {
+    await t.test(`R23 content boundaries cover ${path}`, async () => {
+      const response = await request(path);
+      assert.equal(response.status, 200);
+      const policy = response.headers.get('content-security-policy') ?? '';
+      const directives = new Map(policy.split(';').filter((part) => part.trim()).map((part) => {
+        const [name, ...values] = part.trim().split(/\s+/);
+        return [name, values];
+      }));
+      assert.deepEqual(directives.get('default-src'), ["'self'"], path);
+      assert.deepEqual(directives.get('object-src'), ["'none'"], path);
+      assert.deepEqual(directives.get('base-uri'), ["'self'"], path);
+      assert.deepEqual(directives.get('form-action'), ["'self'"], path);
+      assert.deepEqual(directives.get('frame-ancestors'), ["'none'"], path);
+      assert.deepEqual(directives.get('connect-src'), ["'self'"], path);
+      assert.ok(directives.get('script-src')?.includes("'self'"), path);
+      assert.ok(!directives.get('script-src')?.includes("'unsafe-eval'"), 'production does not allow eval');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff', path);
+      assert.equal(response.headers.get('x-frame-options'), 'DENY', path);
+    });
+  }
+
   await t.test('every admin operation rejects an anonymous request', async () => {
     for (const [route, method] of [
       ['health', 'GET'], ['stats', 'GET'], ['user', 'GET'], ['energy', 'POST'], ['coins', 'GET'],
