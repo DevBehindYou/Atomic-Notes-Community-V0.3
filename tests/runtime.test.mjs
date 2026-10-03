@@ -258,7 +258,7 @@ test('controller login fails closed when its configuration is missing or weak', 
 async function startFakeServer(t, adminKey) {
   const seen = [];
   // Controller state the fake keeps: the session revocation time, and whether sign-in is locked.
-  const state = { revokedBefore: null, locked: false, failEpoch: false, failRevoke: false, coinReplay: true };
+  const state = { revokedBefore: null, locked: false, failEpoch: false, failRevoke: false, coinReplay: true, notificationPages: false };
   const notification = {
     id: '3f0a1c9e-6c1b-4a41-9a0f-6d2f0e7b1a11', type: 'maintenance', subject: 'Contract test subject', description: 'From the fake Server',
     priority: 'high', status: 'active', action: null, action_url: null, icon: null, target_audience: 'all',
@@ -279,7 +279,11 @@ async function startFakeServer(t, adminKey) {
       case 'GET /api/admin/user': return send(200, { user_id: 'u1', email: url.searchParams.get('email'), coins: 5, energy: 20, energy_cap: 120 });
       case 'GET /api/admin/coins': return send(200, { enabled: true, rows: [], next_cursor: null });
       case 'POST /api/admin/energy': return send(200, { ok: true, user_id: 'u1', coins: 6, energy: 30 });
-      case 'GET /api/admin/notifications': return send(200, { rows: [notification] });
+      case 'GET /api/admin/notifications':
+        if (state.notificationPages) return send(200, url.searchParams.has('cursor')
+          ? { rows: [{ ...notification, id: 'older-page-row' }], next_cursor: null }
+          : { rows: [notification], next_cursor: 'fixture-next-cursor' });
+        return send(200, { rows: [notification] });
       case 'POST /api/admin/notifications': return send(200, { row: { ...notification, id: 'created' }, audience_size: 7 });
       case 'PATCH /api/admin/notifications': return send(200, { row: { ...notification, status: 'resolved' } });
       case 'DELETE /api/admin/notifications': return send(200, { ok: true });
@@ -347,6 +351,45 @@ test('Community calls the Server admin and public contract exactly as the Server
     assert.equal((await request('/api/controller/notifications?id=a%20b', { method: 'DELETE', headers })).status, 200);
     assert.deepEqual([last().method, last().query.id], ['DELETE', 'a b']);
     assert.ok(fake.seen.filter((call) => call.path.startsWith('/api/admin/')).every((call) => call.key === KEY));
+  });
+
+  await t.test('R27 notification history preserves the Server next cursor', async () => {
+    fake.state.notificationPages = true;
+    try {
+      const response = await request('/api/controller/notifications', { headers });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).next_cursor, 'fixture-next-cursor');
+      assert.equal(last().query.limit, '50');
+    } finally { fake.state.notificationPages = false; }
+  });
+
+  await t.test('R27 notification history forwards only validated page parameters', async () => {
+    fake.state.notificationPages = true;
+    try {
+      const response = await request('/api/controller/notifications?limit=17&cursor=fixture-next-cursor', { headers });
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.rows[0].id, 'older-page-row');
+      assert.equal(body.next_cursor, null);
+      assert.deepEqual(last().query, { limit: '17', cursor: 'fixture-next-cursor' });
+    } finally { fake.state.notificationPages = false; }
+  });
+
+  await t.test('R27 invalid page parameters do not reach the Server list route', async () => {
+    const count = () => fake.seen.filter((call) => call.path === '/api/admin/notifications').length;
+    const before = count();
+    for (const query of ['?limit=0', '?limit=51', '?limit=abc', '?cursor=', '?cursor=x%2By', `?cursor=${'x'.repeat(513)}`]) {
+      assert.equal((await request('/api/controller/notifications' + query, { headers })).status, 400);
+    }
+    assert.equal(count(), before);
+  });
+
+  await t.test('R27 an older Server without cursors remains readable', async () => {
+    const response = await request('/api/controller/notifications', { headers });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.rows.length, 1);
+    assert.equal(body.next_cursor, null);
   });
 
   await t.test('older Servers and missing request IDs cannot receive unsafe coin adjustments', async () => {
