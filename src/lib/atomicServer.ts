@@ -67,7 +67,9 @@ export const atomicAdmin = {
     energy_delta?: number;
     note?: string;
   }) => request<{ ok: true; user_id: string; coins: number; energy: number }>("/energy", { method: "POST", body }),
-  listNotifications: () => request<{ rows: unknown[] }>("/notifications"),
+  listNotifications: (limit = 50, cursor?: string) =>
+    request<{ rows: unknown[]; next_cursor?: string | null }>(
+      `/notifications?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   createNotification: (body: Record<string, unknown>) =>
     request<{ row: unknown; audience_size?: number }>("/notifications", { method: "POST", body }),
   updateNotification: (body: Record<string, unknown>) =>
