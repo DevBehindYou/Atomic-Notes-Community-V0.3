@@ -14,12 +14,21 @@ function errorResponse(e: unknown, fallback: string) {
   return NextResponse.json({ error: message }, { status });
 }
 
-// List every notification (admin sees all statuses, not just active).
-export async function GET() {
+// Page through every status; only the public/App feeds filter to active notices.
+export async function GET(req: Request) {
   if (!(await isAdmin())) return unauthorized();
+  const params = new URL(req.url).searchParams;
+  const limit = params.get("limit") ?? "50";
+  const cursor = params.get("cursor");
+  if (!/^(?:[1-9]|[1-4][0-9]|50)$/.test(limit)) {
+    return NextResponse.json({ error: "invalid_notification_limit" }, { status: 400 });
+  }
+  if (cursor !== null && (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(cursor))) {
+    return NextResponse.json({ error: "invalid_notification_cursor" }, { status: 400 });
+  }
   try {
-    const { rows } = await atomicAdmin.listNotifications();
-    return NextResponse.json({ rows });
+    const { rows, next_cursor } = await atomicAdmin.listNotifications(Number(limit), cursor ?? undefined);
+    return NextResponse.json({ rows, next_cursor: next_cursor ?? null });
   } catch (e) {
     return errorResponse(e, "Failed to list notifications");
   }
