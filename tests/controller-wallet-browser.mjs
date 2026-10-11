@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const CASES = ['browser_setup', 'input_retires_account', 'reverse_lookup',
   'stale_failure_completion', 'same_owner_page_generation', 'same_owner_refresh_generation',
   'unmount_retires_read', 'settled_adjustment_input_change', 'ambiguous_adjustment_unmount',
-  'current_page_deduplication', 'cleanup'];
+  'current_page_deduplication', 'settled_adjustment_preserves_other_pending', 'cleanup'];
 const cases = Object.fromEntries(CASES.map((name) => [name, 'not_run']));
 const proofFile = process.argv[2] ?? 'ci-controller-wallet-browser-proof.json';
 assert.equal(basename(proofFile), proofFile, 'proof filename must stay in the checkout');
@@ -123,8 +123,18 @@ async function startBackend() {
 class CDP {
   constructor(socket) {
     this.socket = socket; this.id = 0; this.pending = new Map();
+    this.energyRequests = new Set(); this.finishedEnergyRequests = new Set();
     socket.addEventListener('message', (event) => {
       let message; try { message = JSON.parse(event.data); } catch { return; }
+      if (message.method === 'Network.requestWillBeSent') {
+        const { request, requestId } = message.params;
+        if (request.method === 'POST' && request.url === communityBase + '/api/controller/energy') {
+          this.energyRequests.add(requestId);
+        }
+      }
+      if (message.method === 'Network.loadingFinished' && this.energyRequests.has(message.params.requestId)) {
+        this.finishedEnergyRequests.add(message.params.requestId);
+      }
       if (message.id) { const entry = this.pending.get(message.id); if (!entry) return;
         this.pending.delete(message.id); clearTimeout(entry.timer);
         message.error ? entry.reject(new Error('cdp_command_failed')) : entry.resolve(message.result);
@@ -165,7 +175,7 @@ async function startBrowser() {
   assert.equal(new URL(target.webSocketDebuggerUrl).hostname, '127.0.0.1');
   const socket = new WebSocket(target.webSocketDebuggerUrl);
   await bounded(new Promise((done, reject) => { socket.addEventListener('open', done, { once: true }); socket.addEventListener('error', reject, { once: true }); }));
-  cdp = new CDP(socket); await cdp.call('Page.enable'); await cdp.call('Runtime.enable');
+  cdp = new CDP(socket); await cdp.call('Page.enable'); await cdp.call('Runtime.enable'); await cdp.call('Network.enable');
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: 'window.confirm=()=>true;' });
 }
 // All DOM interactions execute on the actual Next-rendered Controller; no hook mock.
@@ -341,6 +351,31 @@ try {
     const state = await snapshot(); assert.equal(state.text.split('base-first').length - 1, 1);
     assert.equal(state.text.split('page-second').length - 1, 1); assert.equal(state.text.includes('Load more batches'), false);
     assert.equal(energyRequests.length, 0);
+  });
+  await runCase('settled_adjustment_preserves_other_pending', async () => {
+    await initialA(); const energy = hold('energy', A);
+    const requestsBefore = new Set(cdp.energyRequests);
+    await applyOne(); await waitFor(() => energy.seen);
+    await waitFor(() => [...cdp.energyRequests].some(id => !requestsBefore.has(id)));
+    const newRequests = [...cdp.energyRequests].filter(id => !requestsBefore.has(id));
+    assert.equal(newRequests.length, 1); const requestId = newRequests[0];
+    const aSaved = (await snapshot()).pending; assert.ok(aSaved);
+    await cdp.evaluate(`document.querySelectorAll('.tabs button')[0].click()`);
+    const other = JSON.stringify({ request_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      user_id: ids[B], coins_delta: 2, energy_delta: 0, note: 'synthetic other-panel request' });
+    assert.notEqual(other, aSaved);
+    await cdp.evaluate(`localStorage.setItem('atomic-controller-pending-adjustment-v1',${JSON.stringify(other)})`);
+    energy.release(200, { ok: true, user_id: ids[A], coins: 51, energy: 20 });
+    // Observe actual HTTP-body completion, then drain the browser's UI task queue.
+    // This is not a timing guess or a copied settlement implementation.
+    await waitFor(() => cdp.finishedEnergyRequests.has(requestId));
+    await cdp.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(()=>done(true))))`);
+    assert.equal(await cdp.evaluate(`localStorage.getItem('atomic-controller-pending-adjustment-v1')`), other);
+    assert.equal(energyRequests.length, 1); assert.equal(energyRequests[0].user_id, ids[A]); assert.equal(creditCount, 1);
+    await readyEconomy();
+    await waitFor(async () => (await snapshot()).pending === other);
+    const state = await snapshot(); assert.equal(state.text.includes(ids[B]), true); assert.equal(state.text.includes('Retry saved adjustment'), true);
+    assert.equal(energyRequests.length, 1); // Merely remounting must not send the saved B request.
   });
 } catch { cases.browser_setup = 'fail'; }
 finally {

@@ -643,6 +643,59 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
   const [busy, setBusy] = useState(false);
   const applying = useRef(false);
   const [pending, setPending] = useState<Adjustment | null>(null);
+  // Financial settlement outlives a display read. Only the latest mounted
+  // read may select an account or change its balances, messages and loading state.
+  const mounted = useRef(true);
+  const generation = useRef(0);
+  const activeRead = useRef<AbortController | null>(null);
+  const pageOwner = useRef<number | null>(null);
+  const selected = useRef<FoundUser | null>(null);
+  const selectedInput = useRef<string | null>(null);
+  const emailInput = useRef("");
+  const currentRead = (ticket: number) => mounted.current && generation.current === ticket;
+
+  function retireRead() {
+    const ticket = ++generation.current;
+    activeRead.current?.abort();
+    activeRead.current = null;
+    if (pageOwner.current !== null) {
+      pageOwner.current = null;
+      if (mounted.current) setBusy((value) => applying.current ? value : false);
+    }
+    return ticket;
+  }
+
+  function beginRead() {
+    const ticket = retireRead();
+    const controller = new AbortController();
+    activeRead.current = controller;
+    return { ticket, signal: controller.signal };
+  }
+
+  function publishFound(ticket: number, value: FoundUser | null, input = selectedInput.current) {
+    if (!currentRead(ticket)) return;
+    selected.current = value;
+    selectedInput.current = value ? input : null;
+    setFound((previous) => currentRead(ticket) ? value : previous);
+  }
+
+  function changeEmail(value: string) {
+    emailInput.current = value;
+    const ticket = retireRead();
+    publishFound(ticket, null);
+    setLooking((previous) => currentRead(ticket) ? false : previous);
+    setEmail(value);
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      retireRead();
+      selected.current = null;
+      selectedInput.current = null;
+    };
+  }, []);
   useEffect(() => {
     try {
       const saved = localStorage.getItem(PENDING_ADJUSTMENT);
@@ -651,70 +704,113 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
   }, [onMsg]);
 
   async function submit(payload: Adjustment) {
-    if (applying.current) return;
-    applying.current = true; setBusy(true);
+    if (!mounted.current || applying.current || pageOwner.current !== null) return;
+    applying.current = true;
+    const ticket = retireRead();
+    setLooking((previous) => currentRead(ticket) ? false : previous);
+    setBusy(true);
+    const serialized = JSON.stringify(payload);
+    const forgetMatchingRequest = () => {
+      // Another mounted panel may own a different saved request. Never erase it.
+      if (localStorage.getItem(PENDING_ADJUSTMENT) === serialized) {
+        localStorage.removeItem(PENDING_ADJUSTMENT);
+      }
+      if (mounted.current) setPending((previous) => previous?.request_id === payload.request_id ? null : previous);
+    };
     try {
-      // A persisted ID must exist before any request. Failure to persist stops the mutation.
-      localStorage.setItem(PENDING_ADJUSTMENT, JSON.stringify(payload));
-      setPending(payload);
+      // Persistence precedes the write; reads/unmount never cancel settlement.
+      localStorage.setItem(PENDING_ADJUSTMENT, serialized);
+      if (mounted.current) setPending(payload);
       const r = await fetch("/api/controller/energy", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: serialized,
       });
       const d = await r.json();
       if (!r.ok) {
-        if (r.status === 400) { localStorage.removeItem(PENDING_ADJUSTMENT); setPending(null); }
+        if (r.status === 400) forgetMatchingRequest();
         throw new Error(d.error || "failed");
       }
-      localStorage.removeItem(PENDING_ADJUSTMENT); setPending(null);
-      setCoins("0"); setEnergy("0"); setNote("");
-      // Saved operation results can be historical; refresh current balances before displaying them.
-      if (found?.user_id === payload.user_id) {
-        try {
-          const fresh = await fetch(`/api/controller/user?email=${encodeURIComponent(found.email)}`);
-          const refreshed: FoundUser | null = fresh.ok ? await fresh.json() : null;
-          setFound((current) => current?.user_id === payload.user_id ? refreshed : current);
-        } catch { setFound((current) => current?.user_id === payload.user_id ? null : current); }
+      forgetMatchingRequest();
+      if (currentRead(ticket)) {
+        setCoins("0"); setEnergy("0"); setNote("");
+        const target = selected.current;
+        if (target?.user_id === payload.user_id) {
+          // A replay result is historical; only this current read can show a
+          // refreshed wallet. Same-owner ABA searches also retire this ticket.
+          const refresh = beginRead();
+          try {
+            const fresh = await fetch(`/api/controller/user?email=${encodeURIComponent(target.email)}`, { signal: refresh.signal });
+            const refreshed: FoundUser | null = fresh.ok ? await fresh.json() : null;
+            publishFound(refresh.ticket, refreshed);
+          } catch { publishFound(refresh.ticket, null); }
+          finally { if (currentRead(refresh.ticket)) activeRead.current = null; }
+          if (currentRead(refresh.ticket)) onMsg("Balance adjusted.");
+        } else { onMsg("Balance adjusted."); }
       }
-      onMsg("Balance adjusted."); onDone();
+      if (mounted.current) onDone();
     } catch (e) {
-      onMsg(`${e instanceof Error ? e.message : "Failed to adjust."} Retry the saved adjustment to confirm its outcome.`);
-    } finally { applying.current = false; setBusy(false); }
+      if (currentRead(ticket)) onMsg(`${e instanceof Error ? e.message : "Failed to adjust."} Retry the saved adjustment to confirm its outcome.`);
+    } finally {
+      applying.current = false;
+      if (mounted.current) setBusy((previous) => applying.current || pageOwner.current !== null ? previous : false);
+    }
   }
 
   async function moreBatches() {
-    if (!found?.coin_details?.next_cursor || busy) return;
-    const target = found;
+    const target = selected.current;
+    const cursor = target?.coin_details?.next_cursor;
+    if (!mounted.current || !target || !cursor || applying.current || pageOwner.current !== null) return;
+    const { ticket, signal } = beginRead();
+    pageOwner.current = ticket;
     setBusy(true);
     try {
-      const r = await fetch(`/api/controller/coins?user_id=${encodeURIComponent(target.user_id)}&cursor=${encodeURIComponent(target.coin_details!.next_cursor!)}`);
+      const r = await fetch(`/api/controller/coins?user_id=${encodeURIComponent(target.user_id)}&cursor=${encodeURIComponent(cursor)}`, { signal });
       const d = await r.json();
+      if (!currentRead(ticket)) return;
       if (!r.ok) throw new Error(d.error || "Could not load batches");
-      setFound((current) => current?.user_id === target.user_id ? { ...current, coin_details: {
-        ...d, rows: [...current.coin_details!.rows, ...d.rows.filter((row: { id: string }) => !current.coin_details!.rows.some((old) => old.id === row.id))],
-      } } : current);
-    } catch (e) { onMsg(e instanceof Error ? e.message : "Could not load batches"); }
-    finally { setBusy(false); }
+      const snapshot = selected.current;
+      if (snapshot?.user_id !== target.user_id || snapshot.coin_details?.next_cursor !== cursor) return;
+      publishFound(ticket, { ...snapshot, coin_details: {
+        ...d, rows: [...snapshot.coin_details.rows, ...d.rows.filter((row: { id: string }) => !snapshot.coin_details!.rows.some((old) => old.id === row.id))],
+      } });
+    } catch (e) { if (currentRead(ticket)) onMsg(e instanceof Error ? e.message : "Could not load batches"); }
+    finally {
+      if (currentRead(ticket)) activeRead.current = null;
+      if (pageOwner.current === ticket) {
+        pageOwner.current = null;
+        if (mounted.current) setBusy((previous) => applying.current || pageOwner.current !== null ? previous : false);
+      }
+    }
   }
 
   async function lookup() {
-    if (busy || applying.current) return;
-    if (!email.trim()) return onMsg("Enter an email to look up.");
-    setLooking(true);
-    setFound(null);
+    if (!mounted.current || applying.current || pageOwner.current !== null) return;
+    const input = emailInput.current.trim();
+    const { ticket, signal } = beginRead();
+    publishFound(ticket, null);
+    if (!input) {
+      setLooking((previous) => currentRead(ticket) ? false : previous);
+      onMsg("Enter an email to look up.");
+      return;
+    }
+    setLooking((previous) => currentRead(ticket) ? true : previous);
     try {
-      const r = await fetch(`/api/controller/user?email=${encodeURIComponent(email.trim())}`);
+      const r = await fetch(`/api/controller/user?email=${encodeURIComponent(input)}`, { signal });
       const d = await r.json();
+      if (!currentRead(ticket)) return;
       if (!r.ok) throw new Error(d.error || "not found");
-      setFound(d);
+      publishFound(ticket, d, input);
     } catch (e) {
-      onMsg(e instanceof Error ? e.message : "Lookup failed.");
+      if (currentRead(ticket)) onMsg(e instanceof Error ? e.message : "Lookup failed.");
     } finally {
-      setLooking(false);
+      if (currentRead(ticket)) activeRead.current = null;
+      setLooking((previous) => currentRead(ticket) ? false : previous);
     }
   }
 
   async function apply() {
-    if (!found) return;
+    const target = selected.current;
+    if (!mounted.current || !target || applying.current || pageOwner.current !== null ||
+        selectedInput.current !== emailInput.current.trim()) return;
     // Whole numbers only: a fraction would leave a wallet holding part of a coin.
     const coinsDelta = Number(coins.trim() || "0");
     const energyDelta = Number(energy.trim() || "0");
@@ -723,17 +819,16 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
     }
     if (Math.abs(coinsDelta) > 100000 || Math.abs(energyDelta) > 100000) return onMsg("Each adjustment must be between -100000 and 100000.");
     if (coinsDelta === 0 && energyDelta === 0) return onMsg("Nothing to adjust.");
-    // This changes a real wallet: say exactly what will happen first.
     const plan = [coinsDelta && `${coinsDelta > 0 ? "+" : ""}${coinsDelta} coins`, energyDelta && `${energyDelta > 0 ? "+" : ""}${energyDelta} energy`]
-      .filter(Boolean)
-      .join(" and ");
-    if (!window.confirm(`Apply ${plan} to ${found.email}? Energy stops at ${found.energy_cap}, coins at 0.`)) return;
+      .filter(Boolean).join(" and ");
+    if (!window.confirm(`Apply ${plan} to ${target.email}? Energy stops at ${target.energy_cap}, coins at 0.`)) return;
+    if (selected.current !== target || selectedInput.current !== emailInput.current.trim()) return;
     try {
       const saved = localStorage.getItem(PENDING_ADJUSTMENT);
       if (saved) { setPending(JSON.parse(saved) as Adjustment); return onMsg("Resolve the saved adjustment before starting another."); }
-      await submit({ request_id: crypto.randomUUID(), user_id: found.user_id,
+      await submit({ request_id: crypto.randomUUID(), user_id: target.user_id,
         coins_delta: coinsDelta, energy_delta: energyDelta, ...(note.trim() ? { note: note.trim() } : {}) });
-    } catch { onMsg("Browser storage is unavailable. No adjustment sent."); }
+    } catch { if (mounted.current) onMsg("Browser storage is unavailable. No adjustment sent."); }
   }
 
   return (
@@ -748,7 +843,7 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
         <input
           data-testid="wallet-email"
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={(e) => changeEmail(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") lookup();
           }}
@@ -828,7 +923,7 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
               className={inputCls}
             />
           </label>
-          <button data-testid="wallet-apply" onClick={apply} disabled={busy || pending !== null} className="btn-signal" style={{ marginTop: 14 }}>
+          <button data-testid="wallet-apply" onClick={apply} disabled={busy || looking || pending !== null} className="btn-signal" style={{ marginTop: 14 }}>
             {busy ? "Applying…" : "Apply adjustment"}
           </button>
         </>
