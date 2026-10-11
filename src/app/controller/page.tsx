@@ -739,13 +739,14 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
   return (
     <section className="module" style={{ marginTop: 14 }}>
       <p className="num">USER LOOKUP · ADJUST</p>
-      {pending && <div role="status" className="module" style={{ marginTop: 12, overflowWrap: "anywhere" }}>
+      {pending && <div data-testid="wallet-pending" role="status" className="module" style={{ marginTop: 12, overflowWrap: "anywhere" }}>
         <p>Unconfirmed adjustment for account {pending.user_id}: {pending.coins_delta} coins, {pending.energy_delta} energy.
           Retry this saved request before starting another; it may already have succeeded.</p>
-        <button className="btn" disabled={busy} onClick={() => submit(pending)}>Retry saved adjustment</button>
+        <button data-testid="wallet-retry" className="btn" disabled={busy} onClick={() => submit(pending)}>Retry saved adjustment</button>
       </div>}
       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
         <input
+          data-testid="wallet-email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           onKeyDown={(e) => {
@@ -755,14 +756,14 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
           className={inputCls}
           style={{ flex: 1, minWidth: 200 }}
         />
-        <button onClick={lookup} disabled={looking || busy} className="btn">
+        <button data-testid="wallet-lookup" onClick={lookup} disabled={looking || busy} className="btn">
           {looking ? "…" : "Look up"}
         </button>
       </div>
 
       {found && (
         <>
-          <div className="module" style={{ background: "#fff", marginTop: 12 }}>
+          <div data-testid="wallet-result" data-user-id={found.user_id} className="module" style={{ background: "#fff", marginTop: 12 }}>
             <div className="mono" style={{ fontSize: ".72rem", color: "var(--slate)" }}>
               {found.email}
               {found.username ? ` · ${found.username}` : ""}
@@ -804,17 +805,17 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
                 <p>{batch.remaining} of {batch.amount} coins remaining · {batch.source}</p>
                 <p>Credited {fmtDate(batch.credited_at)}<br />{batch.expires_at ? `Expiry ${fmtDate(batch.expires_at)}` : "Never expires"} (local time)</p>
               </div>)}
-              {found.coin_details.next_cursor && <button className="btn" onClick={moreBatches} disabled={busy}>Load more batches</button>}
+              {found.coin_details.next_cursor && <button data-testid="wallet-more-batches" className="btn" onClick={moreBatches} disabled={busy}>Load more batches</button>}
             </details>
           </div>}
           <div className="grid g2" style={{ marginTop: 12 }}>
             <label>
               <span className="mono-label">Coins delta (+/-)</span>
-              <input value={coins} onChange={(e) => setCoins(e.target.value)} className={inputCls} />
+              <input data-testid="wallet-coins" value={coins} onChange={(e) => setCoins(e.target.value)} className={inputCls} />
             </label>
             <label>
               <span className="mono-label">Energy delta (+/-)</span>
-              <input value={energy} onChange={(e) => setEnergy(e.target.value)} className={inputCls} />
+              <input data-testid="wallet-energy" value={energy} onChange={(e) => setEnergy(e.target.value)} className={inputCls} />
             </label>
           </div>
           <label style={{ display: "block", marginTop: 12 }}>
@@ -827,7 +828,7 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
               className={inputCls}
             />
           </label>
-          <button onClick={apply} disabled={busy || pending !== null} className="btn-signal" style={{ marginTop: 14 }}>
+          <button data-testid="wallet-apply" onClick={apply} disabled={busy || pending !== null} className="btn-signal" style={{ marginTop: 14 }}>
             {busy ? "Applying…" : "Apply adjustment"}
           </button>
         </>

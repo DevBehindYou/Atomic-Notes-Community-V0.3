@@ -36,3 +36,15 @@ jobs:
         run: npm run build
       - name: Verify production routes and admin sessions
         run: npm run test:smoke
+      - name: Verify real Controller wallet read ownership
+        env:
+          ATOMIC_CONTROLLER_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node tests/controller-wallet-browser.mjs ci-controller-wallet-browser-proof.json
+      - name: Upload sanitized Controller wallet browser proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-controller-wallet-browser-proof
+          path: ci-controller-wallet-browser-proof.json
+          if-no-files-found: error
+          retention-days: 14
