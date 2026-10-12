@@ -467,10 +467,16 @@ try {
     // effects. It only registers this handler; actual native browser input
     // invokes it after the evaluation has returned, in the document event loop.
     domProbePhase = 'prepare_native_probe';
-    const point = await cdp.evaluate(`(()=>{window.__atomicCspViolations=[];const record=e=>window.__atomicCspViolations.push({blocked:e.blockedURI,directive:e.effectiveDirective});document.addEventListener('securitypolicyviolation',record);const b=document.createElement('button');b.id='atomic-native-probe';b.textContent='Generated policy probe';b.style.cssText='position:fixed;left:0;bottom:0;width:200px;height:40px;z-index:2147483647';b.addEventListener('click',()=>{const denied=document.createElement('script');denied.id='atomic-unauthorized-probe';denied.addEventListener('securitypolicyviolation',record);denied.textContent='window.__atomicUnauthorizedProbe=true';document.head.append(denied);const allowed=document.createElement('script');allowed.nonce=${JSON.stringify(nonce)};allowed.textContent='window.__atomicAuthorizedProbe=true';document.head.append(allowed);allowed.remove();},{once:true});document.body.append(b);const r=b.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    const point = await cdp.evaluate(`(()=>{window.__atomicCspViolations=[];const record=e=>window.__atomicCspViolations.push({blocked:e.blockedURI,directive:e.effectiveDirective});document.addEventListener('securitypolicyviolation',record);const b=document.createElement('button');b.id='atomic-native-probe';b.textContent='Generated policy probe';b.style.cssText='position:fixed;left:0;bottom:0;width:200px;height:40px;z-index:2147483647';b.addEventListener('click',()=>{window.__atomicNativeProbeFired=true;const denied=document.createElement('script');denied.id='atomic-unauthorized-probe';denied.addEventListener('securitypolicyviolation',record);denied.textContent='window.__atomicUnauthorizedProbe=true';document.head.append(denied);const allowed=document.createElement('script');allowed.nonce=${JSON.stringify(nonce)};allowed.textContent='window.__atomicAuthorizedProbe=true';document.head.append(allowed);allowed.remove();},{once:true});document.body.append(b);const r=b.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
     domProbePhase = 'native_probe_click';
     await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
     await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    domProbePhase = 'wait_native_event';
+    await waitFor(() => cdp.evaluate(`window.__atomicNativeProbeFired===true`));
+    domProbePhase = 'check_unauthorized_execution';
+    const unauthorized = await cdp.evaluate(`window.__atomicUnauthorizedProbe===true`);
+    if (unauthorized) domProbePhase = 'unauthorized_executed';
+    assert.equal(unauthorized, false);
     domProbePhase = 'wait_violation';
     await waitFor(() => cdp.evaluate(`window.__atomicCspViolations.some(e=>e.blocked==='inline'&&e.directive.startsWith('script-src'))`));
     domProbePhase = 'check_blocked';
