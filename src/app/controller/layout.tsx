@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
 
+// Framework scripts receive the middleware request nonce during SSR. Keep
+// this opt-in local: the public root layout and static blog stay unchanged.
+export const dynamic = "force-dynamic";
+
 // Belt-and-suspenders with the X-Robots-Tag header in next.config: emit a
 // <meta name="robots" content="noindex,nofollow"> for the whole /controller
 // subtree so the secret panel never lands in a search index.

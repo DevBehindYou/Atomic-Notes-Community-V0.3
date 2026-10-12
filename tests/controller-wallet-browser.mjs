@@ -14,18 +14,28 @@ const CASES = ['browser_setup', 'input_retires_account', 'reverse_lookup',
   'unmount_retires_read', 'settled_adjustment_input_change', 'ambiguous_adjustment_unmount',
   'current_page_deduplication', 'settled_adjustment_preserves_other_pending', 'cleanup'];
 const cases = Object.fromEntries(CASES.map((name) => [name, 'not_run']));
+const CSP_CASES = ['browser_setup', 'document_headers', 'spoofed_request_headers',
+  'dom_script_block_and_authorize', 'fresh_document_nonce', 'native_login_logout',
+  'public_document_navigation', 'public_headers_static_blog', 'api_origin_boundary', 'cleanup'];
+const cspCases = Object.fromEntries(CSP_CASES.map((name) => [name, 'not_run']));
 const proofFile = process.argv[2] ?? 'ci-controller-wallet-browser-proof.json';
 assert.equal(basename(proofFile), proofFile, 'proof filename must stay in the checkout');
 assert.match(proofFile, /^[A-Za-z0-9_.-]+\.json$/);
+const cspProofFile = process.argv[3] ?? 'ci-controller-csp-proof.json';
+assert.equal(basename(cspProofFile), cspProofFile);
+assert.match(cspProofFile, /^[A-Za-z0-9_.-]+\.json$/);
+assert.notEqual(cspProofFile, proofFile);
 const sourceHead = /^[a-f0-9]{40}$/.test(process.env.ATOMIC_CONTROLLER_SOURCE_HEAD ?? '') ? process.env.ATOMIC_CONTROLLER_SOURCE_HEAD : null;
 const children = [];
-let ownedTemp, backend, backendBase, communityBase, cdp;
+let ownedTemp, backend, backendBase, communityBase, cdp, policyProxy, policyProxyBase;
+let policyProxyInjected = false;
 const FIRST = 'wallet-fixture-first-key', SECOND = 'wallet-fixture-second-key';
 const A = 'wallet-a@example.test', B = 'wallet-b@example.test';
 const ids = { [A]: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', [B]: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' };
 let energyRequests = [], committed = new Set(), creditCount = 0, caseStop = Infinity;
 const gates = [];
 let fixtureError = false;
+let domProbePhase = 'not_run';
 
 async function bounded(promise, ms = 7000) {
   let timer;
@@ -85,6 +95,15 @@ async function startBackend() {
       for await (const chunk of request) { bytes += chunk.length; if (bytes > 8192) throw new Error('fixture_body_limit'); chunks.push(chunk); }
       const raw = Buffer.concat(chunks).toString('utf8');
       const route = url.pathname;
+      if (route === '/api/public/notifications/active') return send(200, { rows: [{
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', type: 'general', subject: 'Generated public fixture notice',
+        description: 'Local fixture only', priority: 'normal', status: 'active', action: null,
+        action_url: null, icon: null, target_audience: 'all', min_app_version: null,
+        max_app_version: null, created_at: '2026-10-12T00:00:00.000Z', expires_at: null }] });
+      if (route.endsWith('/controller/session-epoch') && request.method === 'POST') {
+        const body = JSON.parse(raw); assert.ok(Number.isSafeInteger(body.revoked_before));
+        return send(200, { revoked_before: body.revoked_before });
+      }
       if (route.endsWith('/controller/session-epoch')) return send(200, { revoked_before: null });
       if (route.endsWith('/controller/login-attempts')) return send(200, { allowed: true, retry_after_seconds: 0 });
       if (request.headers['x-admin-api-key'] !== 'wallet-fixture-admin-key') return send(401, { error: 'fixture_unauthorized' });
@@ -118,6 +137,43 @@ async function startBackend() {
   });
   backend.listen(0, '127.0.0.1'); await once(backend, 'listening');
   backendBase = `http://127.0.0.1:${backend.address().port}`;
+}
+
+async function startPolicyProxy() {
+  // Response augmentation models an HTML injection into the actual built
+  // Controller document. No inspector-authored callback executes the probes.
+  // strict-dynamic deliberately trusts non-parser-inserted scripts, so a
+  // createElement/appendChild test would not test parser-injection protection.
+  policyProxy = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, communityBase);
+      assert.equal(url.origin, communityBase); // never proxy a caller-chosen host
+      assert.ok(['GET', 'HEAD', 'POST'].includes(request.method));
+      const headers = new Headers(request.headers);
+      headers.delete('host'); headers.set('x-forwarded-host', request.headers.host);
+      const chunks = []; let bytes = 0;
+      for await (const chunk of request) { bytes += chunk.length; assert.ok(bytes <= 8192); chunks.push(chunk); }
+      const upstream = await fetch(url, { method: request.method, headers,
+        body: chunks.length ? Buffer.concat(chunks) : undefined, redirect: 'manual', signal: AbortSignal.timeout(7000) });
+      const outputHeaders = Object.fromEntries(upstream.headers);
+      delete outputHeaders['content-encoding']; delete outputHeaders['content-length']; delete outputHeaders['transfer-encoding'];
+      let body = Buffer.from(await upstream.arrayBuffer()); assert.ok(body.length <= 4 * 1024 * 1024);
+      if (url.pathname === '/controller') {
+        const nonce = controllerPolicy(upstream), html = body.toString('utf8');
+        assert.ok(html.includes('<head>'));
+        const probes = `<script nonce="${nonce}">window.__atomicCspViolations=[];document.addEventListener('securitypolicyviolation',e=>window.__atomicCspViolations.push({blocked:e.blockedURI,directive:e.effectiveDirective}));</script>`
+          + `<script>window.__atomicUnauthorizedProbe=true;</script>`
+          + `<script nonce="${nonce}">window.__atomicAuthorizedProbe=true;</script>`;
+        body = Buffer.from(html.replace('<head>', '<head>' + probes)); policyProxyInjected = true;
+      }
+      if (!response.destroyed) { response.writeHead(upstream.status, outputHeaders); response.end(body); }
+    } catch {
+      fixtureError = true;
+      if (!response.destroyed) { response.writeHead(500, { 'content-type': 'application/json' }); response.end('{"error":"fixture_policy_proxy_failure"}'); }
+    }
+  });
+  policyProxy.listen(0, '127.0.0.1'); await once(policyProxy, 'listening');
+  policyProxyBase = `http://127.0.0.1:${policyProxy.address().port}`;
 }
 
 class CDP {
@@ -236,6 +292,56 @@ async function runCase(name, body) {
   catch { cases[name] = 'fail'; }
   finally { caseStop = Infinity; for (const gate of gates) gate.release(503, { error: 'fixture_retired' }); }
 }
+async function runCspCase(name, body) {
+  caseStop = Date.now() + 30000;
+  try { await resetUI(); await body(); assert.ok(Date.now() < caseStop); assert.equal(fixtureError, false); cspCases[name] = 'pass'; }
+  catch { cspCases[name] = 'fail'; }
+  finally { caseStop = Infinity; for (const gate of gates) gate.release(503, { error: 'fixture_retired' }); }
+}
+function policyOf(response) {
+  const raw = response.headers.get('content-security-policy') ?? '';
+  // Duplicate/combined header ownership must not silently weaken the result.
+  assert.equal(raw.includes(','), false);
+  const parts = raw.split(';').map((part) => part.trim()).filter(Boolean);
+  const directives = new Map(parts.map((part) => { const [name, ...values] = part.split(/\s+/); return [name, values]; }));
+  assert.equal(parts.length, directives.size);
+  return directives;
+}
+function controllerPolicy(response) {
+  assert.equal(response.status, 200);
+  const policy = policyOf(response), scripts = policy.get('script-src');
+  assert.ok(scripts?.includes("'self'")); assert.ok(scripts.includes("'strict-dynamic'"));
+  assert.equal(scripts.includes("'unsafe-inline'"), false); assert.equal(scripts.includes("'unsafe-eval'"), false);
+  const nonces = scripts.filter((value) => /^'nonce-[a-f0-9]{64}'$/.test(value));
+  assert.equal(nonces.length, 1); const nonce = nonces[0].slice(7, -1);
+  assert.deepEqual(policy.get('style-src'), ["'self'", "'unsafe-inline'"]);
+  assert.deepEqual(policy.get('frame-ancestors'), ["'none'"]);
+  assert.equal(response.headers.get('x-frame-options'), 'DENY');
+  assert.match(response.headers.get('cache-control') ?? '', /no-store/);
+  assert.match(response.headers.get('x-robots-tag') ?? '', /noindex/);
+  return nonce;
+}
+async function navigateDocument(path) {
+  await cdp.evaluate(`window.__atomicFixtureNavigationMarker=true`);
+  await cdp.call('Page.navigate', { url: communityBase + path });
+  await waitFor(() => cdp.evaluate(`!window.__atomicFixtureNavigationMarker&&document.readyState==='complete'&&Boolean(document.querySelector('main'))`));
+}
+async function nonceInDocument() {
+  const nonces = await cdp.evaluate(`Array.from(document.scripts).map(s=>s.nonce).filter(Boolean)`);
+  assert.ok(nonces.length > 0); assert.ok(nonces.every((nonce) => nonce === nonces[0]));
+  assert.match(nonces[0], /^[a-f0-9]{64}$/); return nonces[0];
+}
+async function nativeLogin() {
+  await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('input[placeholder="First key"]'))`));
+  for (const [placeholder, value] of [['First key', FIRST], ['Second key', SECOND]]) {
+    await cdp.evaluate(`(()=>{const input=document.querySelector('input[placeholder=${JSON.stringify(placeholder)}]');if(!input)throw Error('missing');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)});input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await delay(40);
+    await cdp.evaluate(`document.querySelector('input[placeholder=${JSON.stringify(placeholder)}]').form.requestSubmit()`);
+    await waitFor(() => cdp.evaluate(placeholder === 'First key'
+      ? `Boolean(document.querySelector('input[placeholder="Second key"]'))`
+      : `Boolean(document.querySelector('.tabs'))`));
+  }
+}
 async function cleanup() {
   let clean = true;
   for (const gate of gates) gate.release(503, { error: 'fixture_closed' });
@@ -244,6 +350,7 @@ async function cleanup() {
     try { await cdp.call('Browser.close'); } catch { /* close may precede its acknowledgement */ }
     try { cdp.socket.close(); } catch { clean = false; }
   }
+  if (policyProxy) { try { await bounded(new Promise((done) => { policyProxy.close(done); policyProxy.closeAllConnections(); }), 5000); } catch { clean = false; } }
   for (const record of children.reverse()) {
     const { child, stopped } = record;
     if (child.pid) {
@@ -283,7 +390,7 @@ try {
     NODE_ENV: 'production', NEXT_TELEMETRY_DISABLED: '1', ADMIN_PASSWORD: FIRST, ADMIN_PASSWORD_2: SECOND,
     SESSION_SECRET: 'wallet-fixture-session-secret-0123456789', ADMIN_API_KEY: 'wallet-fixture-admin-key', ATOMIC_SERVER_URL: backendBase });
   await waitFor(async () => { try { return (await fetch(communityBase + '/api/controller/session', { signal: AbortSignal.timeout(1000) })).ok; } catch { return false; } }, 25000);
-  await startBrowser(); await resetUI(); cases.browser_setup = 'pass';
+  await startBrowser(); await resetUI(); cases.browser_setup = 'pass'; cspCases.browser_setup = 'pass';
   await runCase('input_retires_account', async () => {
     await initialA(); await emailInput(B); const state = await snapshot();
     assert.equal(state.found, ''); assert.equal(state.applyEnabled, false); assert.equal(energyRequests.length, 0);
@@ -377,12 +484,110 @@ try {
     const state = await snapshot(); assert.equal(state.text.includes(ids[B]), true); assert.equal(state.text.includes('Retry saved adjustment'), true);
     assert.equal(energyRequests.length, 1); // Merely remounting must not send the saved B request.
   });
+  await runCspCase('document_headers', async () => {
+    const response = await fetch(communityBase + '/controller', { signal: AbortSignal.timeout(7000) });
+    const nonce = controllerPolicy(response), html = await response.text();
+    const tags = html.match(/<script\b[^>]*>/g) ?? []; assert.ok(tags.length > 0);
+    assert.ok(tags.every((tag) => tag.includes(`nonce="${nonce}"`)));
+    assert.equal(response.headers.has('x-nonce'), false); // rendering input is not a new public response header
+  });
+  await runCspCase('spoofed_request_headers', async () => {
+    const forged = 'a'.repeat(64);
+    const response = await fetch(communityBase + '/controller', { signal: AbortSignal.timeout(7000),
+      headers: { 'x-nonce': forged, 'content-security-policy': "script-src 'unsafe-inline' 'nonce-" + forged + "'" } });
+    const nonce = controllerPolicy(response); assert.notEqual(nonce, forged);
+    const html = await response.text(), tags = html.match(/<script\b[^>]*>/g) ?? [];
+    assert.ok(tags.length > 0); assert.ok(tags.every((tag) => tag.includes(`nonce="${nonce}"`)));
+  });
+  await runCspCase('dom_script_block_and_authorize', async () => {
+    domProbePhase = 'parser_document';
+    await startPolicyProxy();
+    await cdp.evaluate(`window.__atomicFixtureNavigationMarker=true`);
+    await cdp.call('Page.navigate', { url: policyProxyBase + '/controller' });
+    await waitFor(() => cdp.evaluate(`!window.__atomicFixtureNavigationMarker&&document.readyState==='complete'&&Boolean(document.querySelector('main'))`));
+    assert.equal(policyProxyInjected, true);
+    await readyEconomy(); await nonceInDocument();
+    domProbePhase = 'check_unauthorized_execution';
+    const unauthorized = await cdp.evaluate(`window.__atomicUnauthorizedProbe===true`);
+    if (unauthorized) domProbePhase = 'unauthorized_executed';
+    assert.equal(unauthorized, false);
+    domProbePhase = 'wait_violation';
+    await waitFor(() => cdp.evaluate(`window.__atomicCspViolations.some(e=>e.blocked==='inline'&&e.directive.startsWith('script-src'))`));
+    domProbePhase = 'check_blocked';
+    assert.equal(await cdp.evaluate(`window.__atomicUnauthorizedProbe===true`), false);
+    domProbePhase = 'check_authorized';
+    assert.equal(await cdp.evaluate(`window.__atomicAuthorizedProbe===true`), true);
+    domProbePhase = 'economy_adjustment';
+    await navigateDocument('/controller'); await readyEconomy();
+    await initialA(); await applyOne(); await waitFor(async () => (await snapshot()).pending === null);
+    assert.equal(creditCount, 1);
+    domProbePhase = 'complete';
+  });
+  await runCspCase('fresh_document_nonce', async () => {
+    const before = await nonceInDocument(); await navigateDocument('/controller'); await readyEconomy();
+    assert.notEqual(await nonceInDocument(), before);
+  });
+  await runCspCase('native_login_logout', async () => {
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent==='Log out everywhere').click()`);
+    await nativeLogin(); await readyEconomy(); await initialA();
+    assert.equal((await snapshot()).found.includes(A), true);
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent==='Log out everywhere').click()`);
+    await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('input[placeholder="First key"]'))`));
+    assert.equal(await cdp.evaluate(`Boolean(document.querySelector('.tabs'))`), false);
+    assert.equal(await cdp.evaluate(`(async()=>{const r=await fetch('/api/controller/session');return (await r.json()).admin})()`), false);
+  });
+  await runCspCase('public_document_navigation', async () => {
+    const before = await nonceInDocument();
+    await cdp.evaluate(`(()=>{window.__atomicFixtureNavigationMarker=true;const a=document.createElement('a');a.href='/';document.body.append(a);a.click();})()`);
+    await waitFor(() => cdp.evaluate(`!window.__atomicFixtureNavigationMarker&&document.readyState==='complete'&&Boolean(document.querySelector('main'))`));
+    assert.ok(await cdp.evaluate(`document.body.textContent.includes('Generated public fixture notice')`));
+    // Negative policy control: the same native-event insertion is intentionally
+    // permitted on a public document, whose inline policy is unchanged.
+    const point = await cdp.evaluate(`(()=>{const b=document.createElement('button');b.id='atomic-public-probe';b.textContent='Generated public policy probe';b.style.cssText='position:fixed;left:0;bottom:0;width:200px;height:40px;z-index:2147483647';b.addEventListener('click',()=>{const s=document.createElement('script');s.textContent='window.__atomicPublicInlineProbe=true';document.head.append(s);s.remove();},{once:true});document.body.append(b);const r=b.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
+    await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    await waitFor(() => cdp.evaluate(`window.__atomicPublicInlineProbe===true`));
+    await cdp.evaluate(`document.getElementById('atomic-public-probe').remove()`);
+    await cdp.evaluate(`(()=>{window.__atomicFixtureNavigationMarker=true;const a=document.createElement('a');a.href='/controller';document.body.append(a);a.click();})()`);
+    await waitFor(() => cdp.evaluate(`!window.__atomicFixtureNavigationMarker&&document.readyState==='complete'&&Boolean(document.querySelector('main'))`));
+    await readyEconomy(); assert.notEqual(await nonceInDocument(), before);
+  });
+  await runCspCase('public_headers_static_blog', async () => {
+    const manifest = JSON.parse(await readFile(resolve('.next/prerender-manifest.json'), 'utf8'));
+    const staticBlog = Object.entries(manifest.routes).filter(([path]) => path.startsWith('/blog/'));
+    assert.ok(staticBlog.length > 0); assert.ok(staticBlog.every(([, info]) => info.initialRevalidateSeconds === false));
+    for (const path of ['/', '/updates', '/blog', staticBlog[0][0], '/api/controller/session']) {
+      const response = await fetch(communityBase + path, { signal: AbortSignal.timeout(7000) });
+      assert.equal(response.status, 200); const policy = policyOf(response), scripts = policy.get('script-src');
+      assert.ok(scripts.includes("'unsafe-inline'")); assert.equal(scripts.some((value) => value.startsWith("'nonce-")), false);
+      assert.equal(scripts.includes("'unsafe-eval'"), false);
+      if (path.startsWith('/blog/')) { assert.equal((response.headers.get('cache-control') ?? '').includes('no-store'), false);
+        assert.match(await response.text(), /application\/ld\+json/); }
+      if (path === '/' || path === '/updates') assert.match(await response.text(), /Generated public fixture notice/);
+    }
+  });
+  await runCspCase('api_origin_boundary', async () => {
+    const response = await fetch(communityBase + '/api/controller/logout', { method: 'POST',
+      headers: { origin: 'https://unrelated.example.test' }, signal: AbortSignal.timeout(7000) });
+    assert.equal(response.status, 403);
+    const same = await cdp.evaluate(`(async()=>{const r=await fetch('/api/controller/session');return r.ok&&(await r.json()).admin})()`);
+    assert.equal(same, true); // refused cross-origin mutation did not log out
+    const api = await fetch(communityBase + '/api/controller/session');
+    assert.match(api.headers.get('cache-control') ?? '', /no-store/);
+    assert.equal(api.headers.get('x-frame-options'), 'DENY');
+  });
 } catch { cases.browser_setup = 'fail'; }
 finally {
   cases.cleanup = await cleanup() ? 'pass' : 'fail';
+  cspCases.cleanup = cases.cleanup;
   const passed = CASES.every((name) => cases[name] === 'pass');
   const proof = { version: 1, scope: 'real Controller DOM; generated localhost wallet API; no production or release claim',
     source_head: sourceHead, phase: 'complete', outcome: passed ? 'pass' : 'fail', cases };
   await writeFile(resolve(proofFile), JSON.stringify(proof, null, 2) + '\n', 'utf8');
-  process.stdout.write(JSON.stringify(proof) + '\n'); process.exitCode = passed ? 0 : 1;
+  const cspPassed = CSP_CASES.every((name) => cspCases[name] === 'pass');
+  const cspProof = { version: 1, scope: 'Controller document script nonces; real DOM and generated localhost APIs; public inline styles and same-origin trust remain',
+    source_head: sourceHead, phase: 'complete', outcome: cspPassed ? 'pass' : 'fail', cases: cspCases, dom_probe_phase: domProbePhase };
+  await writeFile(resolve(cspProofFile), JSON.stringify(cspProof, null, 2) + '\n', 'utf8');
+  process.stdout.write(JSON.stringify(proof) + '\n'); process.stdout.write(JSON.stringify(cspProof) + '\n');
+  process.exitCode = passed && cspPassed ? 0 : 1;
 }
