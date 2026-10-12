@@ -15,7 +15,7 @@ The existing real-DOM Controller fixture uses one owned preinstalled Chrome prof
 
 1. A single strict Controller policy and matching SSR script nonces; preserved framing, no-store and no-index headers.
 2. Caller nonce/CSP overwrite and a different nonce on a fresh document.
-3. An appended unauthorized inline DOM script is blocked with an actual browser CSP violation; an otherwise identical correctly authorized DOM script executes. CDP evaluation only sets up the DOM and does not serve as the security proof.
+3. A native browser input event appends an unauthorized inline DOM script, which must be blocked with an actual browser CSP violation; an otherwise identical correctly authorized DOM script must execute. CDP evaluation only registers the probe handler; input dispatch invokes it after inspector evaluation returns. Inspector evaluation itself can bypass CSP and does not serve as the security proof.
 4. Authorized hydration, actual native form submission through the two-key login, economy lookup/adjustment, existing saved-request replay cases and logout.
 5. Full document navigation to public content and back; generated public notice rendering; unchanged public/API policy and static blog entries in the actual build's prerender manifest.
 6. Existing rejection of cross-origin unsafe API requests, with the current authenticated browser session retained.
