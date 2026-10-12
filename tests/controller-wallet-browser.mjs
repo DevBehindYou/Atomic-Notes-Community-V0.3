@@ -34,6 +34,7 @@ const ids = { [A]: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', [B]: 'bbbbbbbb-bbbb-4
 let energyRequests = [], committed = new Set(), creditCount = 0, caseStop = Infinity;
 const gates = [];
 let fixtureError = false;
+let domProbePhase = 'not_run';
 
 async function bounded(promise, ms = 7000) {
   let timer;
@@ -460,16 +461,25 @@ try {
     assert.ok(tags.length > 0); assert.ok(tags.every((tag) => tag.includes(`nonce="${nonce}"`)));
   });
   await runCspCase('dom_script_block_and_authorize', async () => {
+    domProbePhase = 'read_nonce';
     const nonce = await nonceInDocument();
     // Runtime.evaluate performs only DOM setup; the appended script is subject
     // to the page's actual CSP. CDP eval itself would not prove blocking.
-    await cdp.evaluate(`(()=>{window.__atomicCspViolations=[];document.addEventListener('securitypolicyviolation',e=>window.__atomicCspViolations.push({blocked:e.blockedURI,directive:e.effectiveDirective}));const s=document.createElement('script');s.textContent='window.__atomicUnauthorizedProbe=true';document.head.append(s);s.remove();})()`);
+    domProbePhase = 'append_unauthorized';
+    await cdp.evaluate(`(()=>{window.__atomicCspViolations=[];const record=e=>window.__atomicCspViolations.push({blocked:e.blockedURI,directive:e.effectiveDirective});document.addEventListener('securitypolicyviolation',record);const s=document.createElement('script');s.id='atomic-unauthorized-probe';s.addEventListener('securitypolicyviolation',record);s.textContent='window.__atomicUnauthorizedProbe=true';document.head.append(s);})()`);
+    domProbePhase = 'wait_violation';
     await waitFor(() => cdp.evaluate(`window.__atomicCspViolations.some(e=>e.blocked==='inline'&&e.directive.startsWith('script-src'))`));
+    domProbePhase = 'check_blocked';
     assert.equal(await cdp.evaluate(`window.__atomicUnauthorizedProbe===true`), false);
+    await cdp.evaluate(`document.getElementById('atomic-unauthorized-probe').remove()`);
+    domProbePhase = 'append_authorized';
     await cdp.evaluate(`(()=>{const s=document.createElement('script');s.nonce=${JSON.stringify(nonce)};s.textContent='window.__atomicAuthorizedProbe=true';document.head.append(s);s.remove();})()`);
+    domProbePhase = 'check_authorized';
     assert.equal(await cdp.evaluate(`window.__atomicAuthorizedProbe===true`), true);
+    domProbePhase = 'economy_adjustment';
     await initialA(); await applyOne(); await waitFor(async () => (await snapshot()).pending === null);
     assert.equal(creditCount, 1);
+    domProbePhase = 'complete';
   });
   await runCspCase('fresh_document_nonce', async () => {
     const before = await nonceInDocument(); await navigateDocument('/controller'); await readyEconomy();
@@ -527,7 +537,7 @@ finally {
   await writeFile(resolve(proofFile), JSON.stringify(proof, null, 2) + '\n', 'utf8');
   const cspPassed = CSP_CASES.every((name) => cspCases[name] === 'pass');
   const cspProof = { version: 1, scope: 'Controller document script nonces; real DOM and generated localhost APIs; public inline styles and same-origin trust remain',
-    source_head: sourceHead, phase: 'complete', outcome: cspPassed ? 'pass' : 'fail', cases: cspCases };
+    source_head: sourceHead, phase: 'complete', outcome: cspPassed ? 'pass' : 'fail', cases: cspCases, dom_probe_phase: domProbePhase };
   await writeFile(resolve(cspProofFile), JSON.stringify(cspProof, null, 2) + '\n', 'utf8');
   process.stdout.write(JSON.stringify(proof) + '\n'); process.stdout.write(JSON.stringify(cspProof) + '\n');
   process.exitCode = passed && cspPassed ? 0 : 1;
