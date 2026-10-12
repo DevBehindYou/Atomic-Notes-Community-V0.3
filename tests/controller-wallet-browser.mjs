@@ -502,6 +502,13 @@ try {
     await cdp.evaluate(`(()=>{window.__atomicFixtureNavigationMarker=true;const a=document.createElement('a');a.href='/';document.body.append(a);a.click();})()`);
     await waitFor(() => cdp.evaluate(`!window.__atomicFixtureNavigationMarker&&document.readyState==='complete'&&Boolean(document.querySelector('main'))`));
     assert.ok(await cdp.evaluate(`document.body.textContent.includes('Generated public fixture notice')`));
+    // Negative policy control: the same native-event insertion is intentionally
+    // permitted on a public document, whose inline policy is unchanged.
+    const point = await cdp.evaluate(`(()=>{const b=document.createElement('button');b.id='atomic-public-probe';b.textContent='Generated public policy probe';b.style.cssText='position:fixed;left:0;bottom:0;width:200px;height:40px;z-index:2147483647';b.addEventListener('click',()=>{const s=document.createElement('script');s.textContent='window.__atomicPublicInlineProbe=true';document.head.append(s);s.remove();},{once:true});document.body.append(b);const r=b.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+    await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
+    await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    await waitFor(() => cdp.evaluate(`window.__atomicPublicInlineProbe===true`));
+    await cdp.evaluate(`document.getElementById('atomic-public-probe').remove()`);
     await cdp.evaluate(`(()=>{window.__atomicFixtureNavigationMarker=true;const a=document.createElement('a');a.href='/controller';document.body.append(a);a.click();})()`);
     await waitFor(() => cdp.evaluate(`!window.__atomicFixtureNavigationMarker&&document.readyState==='complete'&&Boolean(document.querySelector('main'))`));
     await readyEconomy(); assert.notEqual(await nonceInDocument(), before);
