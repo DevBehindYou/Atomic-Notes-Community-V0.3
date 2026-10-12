@@ -7,9 +7,9 @@ const nextConfig = {
   reactStrictMode: true,
   async headers() {
     const isDev = process.env.NODE_ENV === "development";
-    // Next's static hydration/structured-data scripts and existing inline
-    // styles need unsafe-inline. This is a resource boundary, not a strict
-    // nonce policy or a substitute for escaping/sanitizing content.
+    // Public static hydration/JSON-LD retains its existing policy. Controller
+    // documents get their request-bound script nonce from middleware instead.
+    // Existing inline styles remain a separate migration on both surfaces.
     const policy = [
       "default-src 'self'",
       `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
@@ -24,7 +24,6 @@ const nextConfig = {
       "frame-src 'none'",
     ].join("; ");
     const shared = [
-      { key: "Content-Security-Policy", value: policy },
       { key: "X-Frame-Options", value: "DENY" },
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
@@ -38,6 +37,8 @@ const nextConfig = {
     ];
     return [
       { source: "/:path*", headers: shared },
+      // Exactly one owner of the Controller document policy: middleware.
+      { source: "/:path((?!controller(?:/|$)).*)", headers: [{ key: "Content-Security-Policy", value: policy }] },
       { source: "/controller", headers: admin },
       { source: "/api/controller/:path*", headers: admin },
     ];
