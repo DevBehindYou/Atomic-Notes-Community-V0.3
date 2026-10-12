@@ -27,7 +27,8 @@ assert.match(cspProofFile, /^[A-Za-z0-9_.-]+\.json$/);
 assert.notEqual(cspProofFile, proofFile);
 const sourceHead = /^[a-f0-9]{40}$/.test(process.env.ATOMIC_CONTROLLER_SOURCE_HEAD ?? '') ? process.env.ATOMIC_CONTROLLER_SOURCE_HEAD : null;
 const children = [];
-let ownedTemp, backend, backendBase, communityBase, cdp;
+let ownedTemp, backend, backendBase, communityBase, cdp, policyProxy, policyProxyBase;
+let policyProxyInjected = false;
 const FIRST = 'wallet-fixture-first-key', SECOND = 'wallet-fixture-second-key';
 const A = 'wallet-a@example.test', B = 'wallet-b@example.test';
 const ids = { [A]: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', [B]: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' };
@@ -136,6 +137,43 @@ async function startBackend() {
   });
   backend.listen(0, '127.0.0.1'); await once(backend, 'listening');
   backendBase = `http://127.0.0.1:${backend.address().port}`;
+}
+
+async function startPolicyProxy() {
+  // Response augmentation models an HTML injection into the actual built
+  // Controller document. No inspector-authored callback executes the probes.
+  // strict-dynamic deliberately trusts non-parser-inserted scripts, so a
+  // createElement/appendChild test would not test parser-injection protection.
+  policyProxy = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, communityBase);
+      assert.equal(url.origin, communityBase); // never proxy a caller-chosen host
+      assert.ok(['GET', 'HEAD', 'POST'].includes(request.method));
+      const headers = new Headers(request.headers);
+      headers.delete('host'); headers.set('x-forwarded-host', request.headers.host);
+      const chunks = []; let bytes = 0;
+      for await (const chunk of request) { bytes += chunk.length; assert.ok(bytes <= 8192); chunks.push(chunk); }
+      const upstream = await fetch(url, { method: request.method, headers,
+        body: chunks.length ? Buffer.concat(chunks) : undefined, redirect: 'manual', signal: AbortSignal.timeout(7000) });
+      const outputHeaders = Object.fromEntries(upstream.headers);
+      delete outputHeaders['content-encoding']; delete outputHeaders['content-length']; delete outputHeaders['transfer-encoding'];
+      let body = Buffer.from(await upstream.arrayBuffer()); assert.ok(body.length <= 4 * 1024 * 1024);
+      if (url.pathname === '/controller') {
+        const nonce = controllerPolicy(upstream), html = body.toString('utf8');
+        assert.ok(html.includes('<head>'));
+        const probes = `<script nonce="${nonce}">window.__atomicCspViolations=[];document.addEventListener('securitypolicyviolation',e=>window.__atomicCspViolations.push({blocked:e.blockedURI,directive:e.effectiveDirective}));</script>`
+          + `<script>window.__atomicUnauthorizedProbe=true;</script>`
+          + `<script nonce="${nonce}">window.__atomicAuthorizedProbe=true;</script>`;
+        body = Buffer.from(html.replace('<head>', '<head>' + probes)); policyProxyInjected = true;
+      }
+      if (!response.destroyed) { response.writeHead(upstream.status, outputHeaders); response.end(body); }
+    } catch {
+      fixtureError = true;
+      if (!response.destroyed) { response.writeHead(500, { 'content-type': 'application/json' }); response.end('{"error":"fixture_policy_proxy_failure"}'); }
+    }
+  });
+  policyProxy.listen(0, '127.0.0.1'); await once(policyProxy, 'listening');
+  policyProxyBase = `http://127.0.0.1:${policyProxy.address().port}`;
 }
 
 class CDP {
@@ -312,6 +350,7 @@ async function cleanup() {
     try { await cdp.call('Browser.close'); } catch { /* close may precede its acknowledgement */ }
     try { cdp.socket.close(); } catch { clean = false; }
   }
+  if (policyProxy) { try { await bounded(new Promise((done) => { policyProxy.close(done); policyProxy.closeAllConnections(); }), 5000); } catch { clean = false; } }
   for (const record of children.reverse()) {
     const { child, stopped } = record;
     if (child.pid) {
@@ -461,18 +500,13 @@ try {
     assert.ok(tags.length > 0); assert.ok(tags.every((tag) => tag.includes(`nonce="${nonce}"`)));
   });
   await runCspCase('dom_script_block_and_authorize', async () => {
-    domProbePhase = 'read_nonce';
-    const nonce = await nonceInDocument();
-    // Inspector evaluation may bypass CSP even for synchronous DOM side
-    // effects. It only registers this handler; actual native browser input
-    // invokes it after the evaluation has returned, in the document event loop.
-    domProbePhase = 'prepare_native_probe';
-    const point = await cdp.evaluate(`(()=>{window.__atomicCspViolations=[];const record=e=>window.__atomicCspViolations.push({blocked:e.blockedURI,directive:e.effectiveDirective});document.addEventListener('securitypolicyviolation',record);const b=document.createElement('button');b.id='atomic-native-probe';b.textContent='Generated policy probe';b.style.cssText='position:fixed;left:0;bottom:0;width:200px;height:40px;z-index:2147483647';b.addEventListener('click',()=>{window.__atomicNativeProbeFired=true;const denied=document.createElement('script');denied.id='atomic-unauthorized-probe';denied.addEventListener('securitypolicyviolation',record);denied.textContent='window.__atomicUnauthorizedProbe=true';document.head.append(denied);const allowed=document.createElement('script');allowed.nonce=${JSON.stringify(nonce)};allowed.textContent='window.__atomicAuthorizedProbe=true';document.head.append(allowed);allowed.remove();},{once:true});document.body.append(b);const r=b.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
-    domProbePhase = 'native_probe_click';
-    await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-    await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
-    domProbePhase = 'wait_native_event';
-    await waitFor(() => cdp.evaluate(`window.__atomicNativeProbeFired===true`));
+    domProbePhase = 'parser_document';
+    await startPolicyProxy();
+    await cdp.evaluate(`window.__atomicFixtureNavigationMarker=true`);
+    await cdp.call('Page.navigate', { url: policyProxyBase + '/controller' });
+    await waitFor(() => cdp.evaluate(`!window.__atomicFixtureNavigationMarker&&document.readyState==='complete'&&Boolean(document.querySelector('main'))`));
+    assert.equal(policyProxyInjected, true);
+    await readyEconomy(); await nonceInDocument();
     domProbePhase = 'check_unauthorized_execution';
     const unauthorized = await cdp.evaluate(`window.__atomicUnauthorizedProbe===true`);
     if (unauthorized) domProbePhase = 'unauthorized_executed';
@@ -481,11 +515,10 @@ try {
     await waitFor(() => cdp.evaluate(`window.__atomicCspViolations.some(e=>e.blocked==='inline'&&e.directive.startsWith('script-src'))`));
     domProbePhase = 'check_blocked';
     assert.equal(await cdp.evaluate(`window.__atomicUnauthorizedProbe===true`), false);
-    await cdp.evaluate(`document.getElementById('atomic-unauthorized-probe').remove()`);
-    await cdp.evaluate(`document.getElementById('atomic-native-probe').remove()`);
     domProbePhase = 'check_authorized';
     assert.equal(await cdp.evaluate(`window.__atomicAuthorizedProbe===true`), true);
     domProbePhase = 'economy_adjustment';
+    await navigateDocument('/controller'); await readyEconomy();
     await initialA(); await applyOne(); await waitFor(async () => (await snapshot()).pending === null);
     assert.equal(creditCount, 1);
     domProbePhase = 'complete';

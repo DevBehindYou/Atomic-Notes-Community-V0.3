@@ -11,11 +11,11 @@ The Controller now authorizes its framework scripts using a fresh request-bound 
 
 ## Proof and acceptance
 
-The existing real-DOM Controller fixture uses one owned preinstalled Chrome profile, one built Next process and one generated localhost API. All 12 wallet ownership/replay/cleanup cases remain. The same process set adds a separate fixed-schema CSP proof (`tests/controller-wallet-browser.mjs:17–25,253–320`) covering:
+The existing real-DOM Controller fixture uses one owned preinstalled Chrome profile, one built Next process and one generated localhost API. All 12 wallet ownership/replay/cleanup cases remain. A tiny owned localhost HTTP proxy augments the actual built Controller HTML for one parser-injection case; it does not add a duplicate browser/Next process. The same process set adds a separate fixed-schema CSP proof (`tests/controller-wallet-browser.mjs:17–25`) covering:
 
 1. A single strict Controller policy and matching SSR script nonces; preserved framing, no-store and no-index headers.
 2. Caller nonce/CSP overwrite and a different nonce on a fresh document.
-3. A native browser input event appends an unauthorized inline DOM script, which must be blocked with an actual browser CSP violation; an otherwise identical correctly authorized DOM script must execute. CDP evaluation only registers the probe handler; input dispatch invokes it after inspector evaluation returns. Inspector evaluation itself can bypass CSP and does not serve as the security proof.
+3. The actual browser parser creates unauthorized no-nonce and matching-nonce script elements from a generated HTML injection into the built Controller document. The unauthorized marker must remain absent with an actual CSP violation; the matching-nonce marker must execute. CDP only observes outcomes and does not execute these probes. An appendChild probe is not a denial test under `strict-dynamic`: that policy deliberately trusts non-parser-inserted scripts. The response augmentation preserves the actual Next document policy, assets and hydration, and the owned proxy is closed during cleanup.
 4. Authorized hydration, actual native form submission through the two-key login, economy lookup/adjustment, existing saved-request replay cases and logout.
 5. Full document navigation to public content and back; generated public notice rendering; unchanged public/API policy and static blog entries in the actual build's prerender manifest. A native-event nonce-less public script executes as a policy control, showing the probe distinguishes the permissive public policy from Controller protection.
 6. Existing rejection of cross-origin unsafe API requests, with the current authenticated browser session retained.
@@ -31,5 +31,7 @@ Validation at PR creation: Node syntax parsing and scoped Git whitespace validat
 **Document navigation:** CSP belongs to the loaded document. Arbitrary soft navigation from a public document cannot upgrade its policy through an RSC response. Current public navigation exposes no Controller link; privileged-entry proof uses a new full document. Do not add a public soft-navigation Controller link and claim it inherits a new strict document policy without addressing that boundary.
 
 **Styles and public content:** React inline style attributes remain allowed. Public JSON-LD/static hydration and existing public resource policy are unchanged. No site-wide nonce migration, experimental SRI, new cookie lifetime, idle revocation, rate limiter, policy activation or deployment is included.
+
+**Dynamic trust:** `strict-dynamic` permits scripts created by trusted runtime code, including non-parser-inserted inline scripts. This policy protects against unauthorized parser-inserted markup; it does not repair a trusted script gadget that executes attacker-controlled code. The browser fixture therefore uses ordinary parser insertion for the denial proof. This behavior also appears in the current [CSP3 editor's draft inline matching algorithm](https://w3c.github.io/webappsec-csp/#match-element-to-source-list); the draft is explanatory, while the exact browser fixture is the implementation acceptance evidence.
 
 Generated CI browser proof is not deployed Vercel header validation, real credential testing or a complete security audit. Production deployment/cache acceptance remains separate.
