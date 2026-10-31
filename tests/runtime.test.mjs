@@ -83,9 +83,31 @@ async function adminCookie({ request }) {
 test('production routes preserve authentication and public content', { timeout: 90000 }, async (t) => {
   const { base, request } = await startCommunity(t);
 
+  for (const path of ['/', '/support-atomic-notes', '/blog', '/updates', '/controller', '/api/controller/session']) {
+    await t.test(`R23 content boundaries cover ${path}`, async () => {
+      const response = await request(path);
+      assert.equal(response.status, 200);
+      const policy = response.headers.get('content-security-policy') ?? '';
+      const directives = new Map(policy.split(';').filter((part) => part.trim()).map((part) => {
+        const [name, ...values] = part.trim().split(/\s+/);
+        return [name, values];
+      }));
+      assert.deepEqual(directives.get('default-src'), ["'self'"], path);
+      assert.deepEqual(directives.get('object-src'), ["'none'"], path);
+      assert.deepEqual(directives.get('base-uri'), ["'self'"], path);
+      assert.deepEqual(directives.get('form-action'), ["'self'"], path);
+      assert.deepEqual(directives.get('frame-ancestors'), ["'none'"], path);
+      assert.deepEqual(directives.get('connect-src'), ["'self'"], path);
+      assert.ok(directives.get('script-src')?.includes("'self'"), path);
+      assert.ok(!directives.get('script-src')?.includes("'unsafe-eval'"), 'production does not allow eval');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff', path);
+      assert.equal(response.headers.get('x-frame-options'), 'DENY', path);
+    });
+  }
+
   await t.test('every admin operation rejects an anonymous request', async () => {
     for (const [route, method] of [
-      ['health', 'GET'], ['stats', 'GET'], ['user', 'GET'], ['energy', 'POST'],
+      ['health', 'GET'], ['stats', 'GET'], ['user', 'GET'], ['energy', 'POST'], ['coins', 'GET'],
       ['notifications', 'GET'], ['notifications', 'POST'],
       ['notifications', 'PATCH'], ['notifications', 'DELETE'],
     ]) {
@@ -258,7 +280,7 @@ test('controller login fails closed when its configuration is missing or weak', 
 async function startFakeServer(t, adminKey) {
   const seen = [];
   // Controller state the fake keeps: the session revocation time, and whether sign-in is locked.
-  const state = { revokedBefore: null, locked: false };
+  const state = { revokedBefore: null, locked: false, failEpoch: false, failRevoke: false, coinReplay: true, notificationPages: false };
   const notification = {
     id: '3f0a1c9e-6c1b-4a41-9a0f-6d2f0e7b1a11', type: 'maintenance', subject: 'Contract test subject', description: 'From the fake Server',
     priority: 'high', status: 'active', action: null, action_url: null, icon: null, target_audience: 'all',
@@ -274,16 +296,24 @@ async function startFakeServer(t, adminKey) {
     if (url.pathname === '/api/public/notifications/active') return send(200, { rows: [notification] });
     if (req.headers['x-admin-api-key'] !== adminKey) return send(401, { error: 'unauthorized' });
     switch (`${req.method} ${url.pathname}`) {
-      case 'GET /api/admin/health': return send(200, { db: true, dbError: null, configuration: [], time: 'now' });
+      case 'GET /api/admin/health': return send(200, { coin_request_replay: state.coinReplay, db: true, dbError: null, configuration: [], time: 'now' });
       case 'GET /api/admin/stats': return send(200, { stats: { users: 3 } });
       case 'GET /api/admin/user': return send(200, { user_id: 'u1', email: url.searchParams.get('email'), coins: 5, energy: 20, energy_cap: 120 });
+      case 'GET /api/admin/coins': return send(200, { enabled: true, rows: [], next_cursor: null });
       case 'POST /api/admin/energy': return send(200, { ok: true, user_id: 'u1', coins: 6, energy: 30 });
-      case 'GET /api/admin/notifications': return send(200, { rows: [notification] });
+      case 'GET /api/admin/notifications':
+        if (state.notificationPages) return send(200, url.searchParams.has('cursor')
+          ? { rows: [{ ...notification, id: 'older-page-row' }], next_cursor: null }
+          : { rows: [notification], next_cursor: 'fixture-next-cursor' });
+        return send(200, { rows: [notification] });
       case 'POST /api/admin/notifications': return send(200, { row: { ...notification, id: 'created' }, audience_size: 7 });
       case 'PATCH /api/admin/notifications': return send(200, { row: { ...notification, status: 'resolved' } });
       case 'DELETE /api/admin/notifications': return send(200, { ok: true });
-      case 'GET /api/admin/controller/session-epoch': return send(200, { revoked_before: state.revokedBefore });
+      case 'GET /api/admin/controller/session-epoch':
+        if (state.failEpoch) return send(503, { error: 'epoch_unavailable' });
+        return send(200, { revoked_before: state.revokedBefore });
       case 'POST /api/admin/controller/session-epoch':
+        if (state.failRevoke) return send(503, { error: 'revocation_unavailable' });
         state.revokedBefore = Math.max(state.revokedBefore ?? 0, JSON.parse(raw).revoked_before);
         return send(200, { revoked_before: state.revokedBefore });
       case 'POST /api/admin/controller/login-attempts':
@@ -322,9 +352,13 @@ test('Community calls the Server admin and public contract exactly as the Server
     assert.equal(user.email, 'a+b@example.com');
     assert.deepEqual([last().path, last().query.email], ['/api/admin/user', 'a+b@example.com']);
 
-    const energy = await post('/api/controller/energy', { email: 'a@example.com', coins_delta: '1', energy_delta: 10, note: 'test' });
+    const batches = await request('/api/controller/coins?user_id=u1&cursor=opaque%2Bcursor', { headers });
+    assert.equal(batches.status, 200);
+    assert.deepEqual([last().path, last().query], ['/api/admin/coins', { user_id: 'u1', cursor: 'opaque+cursor' }]);
+
+    const energy = await post('/api/controller/energy', { email: 'a@example.com', coins_delta: '1', energy_delta: 10, note: 'test', request_id: '5c4f1ecc-0a9a-4f86-825b-5fdd7870e310' });
     assert.equal(energy.status, 200);
-    assert.deepEqual(last().body, { email: 'a@example.com', coins_delta: 1, energy_delta: 10, note: 'test' });
+    assert.deepEqual(last().body, { email: 'a@example.com', coins_delta: 1, energy_delta: 10, note: 'test', request_id: '5c4f1ecc-0a9a-4f86-825b-5fdd7870e310' });
     assert.equal(last().contentType, 'application/json');
 
     assert.equal((await request('/api/controller/notifications', { headers })).status, 200);
@@ -339,6 +373,56 @@ test('Community calls the Server admin and public contract exactly as the Server
     assert.equal((await request('/api/controller/notifications?id=a%20b', { method: 'DELETE', headers })).status, 200);
     assert.deepEqual([last().method, last().query.id], ['DELETE', 'a b']);
     assert.ok(fake.seen.filter((call) => call.path.startsWith('/api/admin/')).every((call) => call.key === KEY));
+  });
+
+  await t.test('R27 notification history preserves the Server next cursor', async () => {
+    fake.state.notificationPages = true;
+    try {
+      const response = await request('/api/controller/notifications', { headers });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).next_cursor, 'fixture-next-cursor');
+      assert.equal(last().query.limit, '50');
+    } finally { fake.state.notificationPages = false; }
+  });
+
+  await t.test('R27 notification history forwards only validated page parameters', async () => {
+    fake.state.notificationPages = true;
+    try {
+      const response = await request('/api/controller/notifications?limit=17&cursor=fixture-next-cursor', { headers });
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.rows[0].id, 'older-page-row');
+      assert.equal(body.next_cursor, null);
+      assert.deepEqual(last().query, { limit: '17', cursor: 'fixture-next-cursor' });
+    } finally { fake.state.notificationPages = false; }
+  });
+
+  await t.test('R27 invalid page parameters do not reach the Server list route', async () => {
+    const count = () => fake.seen.filter((call) => call.path === '/api/admin/notifications').length;
+    const before = count();
+    for (const query of ['?limit=0', '?limit=51', '?limit=abc', '?cursor=', '?cursor=x%2By', `?cursor=${'x'.repeat(513)}`]) {
+      assert.equal((await request('/api/controller/notifications' + query, { headers })).status, 400);
+    }
+    assert.equal(count(), before);
+  });
+
+  await t.test('R27 an older Server without cursors remains readable', async () => {
+    const response = await request('/api/controller/notifications', { headers });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.rows.length, 1);
+    assert.equal(body.next_cursor, null);
+  });
+
+  await t.test('older Servers and missing request IDs cannot receive unsafe coin adjustments', async () => {
+    const count = () => fake.seen.filter((call) => call.path === '/api/admin/energy').length;
+    const before = count();
+    assert.equal((await post('/api/controller/energy', { user_id: 'u1', coins_delta: 1 })).status, 400);
+    fake.state.coinReplay = false;
+    try {
+      assert.equal((await post('/api/controller/energy', { user_id: 'u1', coins_delta: 1, request_id: '5c4f1ecc-0a9a-4f86-825b-5fdd7870e310' })).status, 409);
+      assert.equal(count(), before);
+    } finally { fake.state.coinReplay = true; }
   });
 
   await t.test('invalid controller input never reaches the Server', async () => {
@@ -411,7 +495,52 @@ test('Community calls the Server admin and public contract exactly as the Server
     // A session made while the Server was up still gets only errors, never success, during an outage.
     const stamp = String(Date.now());
     const cookie = { cookie: `${COOKIE}=${stamp}.${sign(stamp)}` };
-    assert.equal((await down.request('/api/controller/stats', { headers: cookie })).status, 500);
+    assert.equal((await down.request('/api/controller/stats', { headers: cookie })).status, 401);
     assert.equal((await down.request('/updates')).status, 200, 'the public page degrades instead of failing');
   });
+});
+
+
+test('revocation lookup failure cannot authorize a copied cookie', { timeout: 30000 }, async (t) => {
+  const KEY = 'isolated-revocation-test-key-000000';
+  const fake = await startFakeServer(t, KEY);
+  fake.state.revokedBefore = Date.now();
+  fake.state.failEpoch = true;
+  const { request } = await startCommunity(t, { ATOMIC_SERVER_URL: fake.url, ADMIN_API_KEY: KEY });
+  const stamp = String(Date.now() - 1000);
+  const headers = { cookie: `${COOKIE}=${stamp}.${sign(stamp)}` };
+  const result = await request('/api/controller/stats', { headers });
+  assert.equal(result.status, 401);
+  assert.equal(fake.seen.some((call) => call.path === '/api/admin/stats'), false,
+    'protected request must stop before the reachable downstream admin route');
+});
+
+test('expired revocation cache cannot authorize during an epoch outage', { timeout: 30000 }, async (t) => {
+  const KEY = 'isolated-epoch-cache-test-key-00000';
+  const fake = await startFakeServer(t, KEY);
+  const { request } = await startCommunity(t, { ATOMIC_SERVER_URL: fake.url, ADMIN_API_KEY: KEY });
+  const headers = await adminCookie({ request });
+  assert.equal((await request('/api/controller/stats', { headers })).status, 200);
+  fake.state.revokedBefore = Date.now();
+  fake.state.failEpoch = true;
+  await delay(5100);
+  const calls = fake.seen.filter((call) => call.path === '/api/admin/stats').length;
+  assert.equal((await request('/api/controller/stats', { headers })).status, 401);
+  assert.equal(fake.seen.filter((call) => call.path === '/api/admin/stats').length, calls);
+  fake.state.failEpoch = false;
+  assert.equal((await request('/api/controller/stats', { headers })).status, 401,
+    'recovery must observe the revocation, not restore the stale cache');
+});
+
+test('failed global logout explicitly reports only local cookie removal', { timeout: 30000 }, async (t) => {
+  const KEY = 'isolated-revoke-failure-test-key-00';
+  const fake = await startFakeServer(t, KEY);
+  const { request } = await startCommunity(t, { ATOMIC_SERVER_URL: fake.url, ADMIN_API_KEY: KEY });
+  const headers = await adminCookie({ request });
+  fake.state.failRevoke = true;
+  const response = await request('/api/controller/logout', { method: 'POST', headers });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, revoked: false });
+  assert.match(response.headers.get('set-cookie'), /Max-Age=0/i);
+  assert.equal(fake.state.revokedBefore, null);
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { NOTIFICATION_TYPES, PRIORITIES } from "@/lib/content";
 
 type Row = {
@@ -46,6 +46,7 @@ type Tab = "overview" | "notifications" | "economy" | "health";
 export default function ControllerPage() {
   const [checking, setChecking] = useState(true);
   const [admin, setAdmin] = useState(false);
+  const [logoutNotice, setLogoutNotice] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/controller/session")
@@ -62,7 +63,10 @@ export default function ControllerPage() {
       </Shell>
     );
   }
-  return admin ? <Dashboard onLogout={() => setAdmin(false)} /> : <Login onIn={() => setAdmin(true)} />;
+  return admin ? <Dashboard onLogout={(notice) => {
+    setLogoutNotice(notice ?? null);
+    setAdmin(false);
+  }} /> : <Login notice={logoutNotice} onIn={() => { setLogoutNotice(null); setAdmin(true); }} />;
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -75,7 +79,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Login({ onIn }: { onIn: () => void }) {
+function Login({ onIn, notice }: { onIn: () => void; notice: string | null }) {
   const [step, setStep] = useState<1 | 2>(1);
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
@@ -121,6 +125,7 @@ function Login({ onIn }: { onIn: () => void }) {
 
   return (
     <Shell>
+      {notice && <p role="alert">{notice}</p>}
       <h1 style={{ fontSize: "2.4rem" }}>Restricted.</h1>
       <p style={{ color: "var(--slate)", marginTop: 8 }}>
         {step === 1 ? "Enter the first key." : "Enter the second key."}
@@ -168,11 +173,16 @@ function Login({ onIn }: { onIn: () => void }) {
   );
 }
 
-function Dashboard({ onLogout }: { onLogout: () => void }) {
+function Dashboard({ onLogout }: { onLogout: (notice?: string) => void }) {
   const [tab, setTab] = useState<Tab>("overview");
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [rowsLoading, setRowsLoading] = useState(true);
+  const [rowsError, setRowsError] = useState<string | null>(null);
+  const [retryCursor, setRetryCursor] = useState<string | undefined>();
+  const rowsRequest = useRef(0);
   const [msg, setMsg] = useState<string | null>(null);
 
   // A 401 means this session was ended (Log out on another browser): back to the login screen.
@@ -182,6 +192,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       onLogout();
       throw new Error("signed out");
     }
+    if (!r.ok) throw new Error("request_failed");
     return r.json();
   }, [onLogout]);
 
@@ -195,23 +206,45 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     }
   }, [get]);
 
-  const loadRows = useCallback(async () => {
+  const loadRows = useCallback(async (cursor?: string) => {
+    const request = ++rowsRequest.current;
+    setRowsLoading(true);
+    setRowsError(null);
     try {
-      const d = await get("/api/controller/notifications");
-      setRows(d.rows ?? []);
+      const d = await get(`/api/controller/notifications?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      if (request !== rowsRequest.current) return;
+      if (!Array.isArray(d.rows) || (cursor && d.next_cursor === cursor)) throw new Error("invalid_page");
+      setRows((previous) => {
+        if (!cursor) return d.rows;
+        const known = new Set(previous.map((row) => row.id));
+        return [...previous, ...d.rows.filter((row: Row) => !known.has(row.id))];
+      });
+      setNextCursor(typeof d.next_cursor === "string" ? d.next_cursor : null);
     } catch {
-      setMsg("Could not load notifications.");
+      if (request !== rowsRequest.current) return;
+      setRetryCursor(cursor);
+      setRowsError("Could not load notifications. Retry this request.");
+    } finally {
+      if (request === rowsRequest.current) setRowsLoading(false);
     }
   }, [get]);
 
   useEffect(() => {
     loadStats();
     loadRows();
+    return () => { rowsRequest.current++; };
   }, [loadStats, loadRows]);
 
   async function logout() {
-    await fetch("/api/controller/logout", { method: "POST" });
-    onLogout();
+    try {
+      const response = await fetch("/api/controller/logout", { method: "POST" });
+      if (!response.ok) throw new Error("logout_failed");
+      const result = await response.json();
+      onLogout(result.revoked === true ? undefined
+        : "Signed out of this browser. Other Controller sessions could not be revoked. Sign in and retry Log out everywhere when the Server is reachable.");
+    } catch {
+      setMsg("Could not confirm logout. Please retry; other sessions may still be active.");
+    }
   }
 
   return (
@@ -241,7 +274,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       {tab === "notifications" && (
         <>
           <NewNotification onCreated={loadRows} onMsg={setMsg} />
-          <NotifList rows={rows} onChanged={loadRows} onMsg={setMsg} />
+          <NotifList rows={rows} onChanged={() => loadRows()} onMsg={setMsg}
+            loading={rowsLoading} error={rowsError} nextCursor={nextCursor}
+            onMore={() => { if (nextCursor) void loadRows(nextCursor); }}
+            onRetry={() => { void loadRows(retryCursor); }} />
         </>
       )}
       {tab === "economy" && <Economy stats={stats} onMsg={setMsg} onDone={loadStats} />}
@@ -501,17 +537,30 @@ function NewNotification({
   );
 }
 
-function NotifList({ rows, onChanged, onMsg }: { rows: Row[]; onChanged: () => void; onMsg: (m: string) => void }) {
+function NotifList({ rows, onChanged, onMsg, loading, error, nextCursor, onMore, onRetry }: {
+  rows: Row[]; onChanged: () => void; onMsg: (m: string) => void;
+  loading: boolean; error: string | null; nextCursor: string | null;
+  onMore: () => void; onRetry: () => void;
+}) {
   return (
     <section>
       <p className="num">ALL NOTIFICATIONS</p>
       <div className="hairline" style={{ margin: "8px 0 12px" }} />
-      {rows.length === 0 && <p style={{ color: "var(--slate)" }}>None yet.</p>}
+      <p className="mono-label" aria-live="polite">{rows.length} notifications loaded</p>
+      {loading && <p role="status">Loading notifications…</p>}
+      {error && <div role="alert" style={{ marginTop: 12 }}>
+        <p style={{ color: "var(--error)" }}>{error}</p>
+        <button onClick={onRetry} disabled={loading} className="btn-ghost">Retry</button>
+      </div>}
+      {!loading && !error && rows.length === 0 && <p style={{ color: "var(--slate)" }}>None yet.</p>}
       <div style={{ display: "grid", gap: 10 }}>
         {rows.map((n) => (
           <NotifRow key={n.id} n={n} onChanged={onChanged} onMsg={onMsg} />
         ))}
       </div>
+      {nextCursor && <button onClick={onMore} disabled={loading} className="btn-ghost" style={{ marginTop: 14 }}>
+        {loading ? "Loading…" : "Load more"}
+      </button>}
     </section>
   );
 }
@@ -551,6 +600,13 @@ function NotifRow({ n, onChanged, onMsg }: { n: Row; onChanged: () => void; onMs
   );
 }
 
+type CoinDetails = {
+  enabled: boolean; non_expiring_coins: number; next_expiry_coins: number; next_expiry_at: string | null;
+  next_cursor: string | null; server_time: string;
+  rows: { id: string; source: string; amount: number; remaining: number; credited_at: string; expires_at: string | null }[];
+};
+type Adjustment = { request_id: string; user_id: string; coins_delta: number; energy_delta: number; note?: string };
+const PENDING_ADJUSTMENT = "atomic-controller-pending-adjustment-v1";
 type FoundUser = {
   user_id: string;
   email: string;
@@ -563,6 +619,7 @@ type FoundUser = {
   energy: number;
   energy_cap: number;
   last_daily_grant_at: string | null;
+  coin_details?: CoinDetails | null;
 };
 
 function fmtDate(d: string | null | undefined): string {
@@ -584,71 +641,209 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
   const [note, setNote] = useState("");
   const [looking, setLooking] = useState(false);
   const [busy, setBusy] = useState(false);
+  const applying = useRef(false);
+  const [pending, setPending] = useState<Adjustment | null>(null);
+  // Financial settlement outlives a display read. Only the latest mounted
+  // read may select an account or change its balances, messages and loading state.
+  const mounted = useRef(true);
+  const generation = useRef(0);
+  const activeRead = useRef<AbortController | null>(null);
+  const pageOwner = useRef<number | null>(null);
+  const selected = useRef<FoundUser | null>(null);
+  const selectedInput = useRef<string | null>(null);
+  const emailInput = useRef("");
+  const currentRead = (ticket: number) => mounted.current && generation.current === ticket;
+
+  function retireRead() {
+    const ticket = ++generation.current;
+    activeRead.current?.abort();
+    activeRead.current = null;
+    if (pageOwner.current !== null) {
+      pageOwner.current = null;
+      if (mounted.current) setBusy((value) => applying.current ? value : false);
+    }
+    return ticket;
+  }
+
+  function beginRead() {
+    const ticket = retireRead();
+    const controller = new AbortController();
+    activeRead.current = controller;
+    return { ticket, signal: controller.signal };
+  }
+
+  function publishFound(ticket: number, value: FoundUser | null, input = selectedInput.current) {
+    if (!currentRead(ticket)) return;
+    selected.current = value;
+    selectedInput.current = value ? input : null;
+    setFound((previous) => currentRead(ticket) ? value : previous);
+  }
+
+  function changeEmail(value: string) {
+    emailInput.current = value;
+    const ticket = retireRead();
+    publishFound(ticket, null);
+    setLooking((previous) => currentRead(ticket) ? false : previous);
+    setEmail(value);
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      retireRead();
+      selected.current = null;
+      selectedInput.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(PENDING_ADJUSTMENT);
+      if (saved) setPending(JSON.parse(saved) as Adjustment);
+    } catch { onMsg("Saved adjustment could not be read. Resolve browser storage before issuing credits."); }
+  }, [onMsg]);
+
+  async function submit(payload: Adjustment) {
+    if (!mounted.current || applying.current || pageOwner.current !== null) return;
+    applying.current = true;
+    const ticket = retireRead();
+    setLooking((previous) => currentRead(ticket) ? false : previous);
+    setBusy(true);
+    const serialized = JSON.stringify(payload);
+    const forgetMatchingRequest = () => {
+      // Another mounted panel may own a different saved request. Never erase it.
+      if (localStorage.getItem(PENDING_ADJUSTMENT) === serialized) {
+        localStorage.removeItem(PENDING_ADJUSTMENT);
+      }
+      if (mounted.current) setPending((previous) => previous?.request_id === payload.request_id ? null : previous);
+    };
+    try {
+      // Persistence precedes the write; reads/unmount never cancel settlement.
+      localStorage.setItem(PENDING_ADJUSTMENT, serialized);
+      if (mounted.current) setPending(payload);
+      const r = await fetch("/api/controller/energy", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: serialized,
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        if (r.status === 400) forgetMatchingRequest();
+        throw new Error(d.error || "failed");
+      }
+      forgetMatchingRequest();
+      if (currentRead(ticket)) {
+        setCoins("0"); setEnergy("0"); setNote("");
+        const target = selected.current;
+        if (target?.user_id === payload.user_id) {
+          // A replay result is historical; only this current read can show a
+          // refreshed wallet. Same-owner ABA searches also retire this ticket.
+          const refresh = beginRead();
+          try {
+            const fresh = await fetch(`/api/controller/user?email=${encodeURIComponent(target.email)}`, { signal: refresh.signal });
+            const refreshed: FoundUser | null = fresh.ok ? await fresh.json() : null;
+            publishFound(refresh.ticket, refreshed);
+          } catch { publishFound(refresh.ticket, null); }
+          finally { if (currentRead(refresh.ticket)) activeRead.current = null; }
+          if (currentRead(refresh.ticket)) onMsg("Balance adjusted.");
+        } else { onMsg("Balance adjusted."); }
+      }
+      if (mounted.current) onDone();
+    } catch (e) {
+      if (currentRead(ticket)) onMsg(`${e instanceof Error ? e.message : "Failed to adjust."} Retry the saved adjustment to confirm its outcome.`);
+    } finally {
+      applying.current = false;
+      if (mounted.current) setBusy((previous) => applying.current || pageOwner.current !== null ? previous : false);
+    }
+  }
+
+  async function moreBatches() {
+    const target = selected.current;
+    const cursor = target?.coin_details?.next_cursor;
+    if (!mounted.current || !target || !cursor || applying.current || pageOwner.current !== null) return;
+    const { ticket, signal } = beginRead();
+    pageOwner.current = ticket;
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/controller/coins?user_id=${encodeURIComponent(target.user_id)}&cursor=${encodeURIComponent(cursor)}`, { signal });
+      const d = await r.json();
+      if (!currentRead(ticket)) return;
+      if (!r.ok) throw new Error(d.error || "Could not load batches");
+      const snapshot = selected.current;
+      if (snapshot?.user_id !== target.user_id || snapshot.coin_details?.next_cursor !== cursor) return;
+      publishFound(ticket, { ...snapshot, coin_details: {
+        ...d, rows: [...snapshot.coin_details.rows, ...d.rows.filter((row: { id: string }) => !snapshot.coin_details!.rows.some((old) => old.id === row.id))],
+      } });
+    } catch (e) { if (currentRead(ticket)) onMsg(e instanceof Error ? e.message : "Could not load batches"); }
+    finally {
+      if (currentRead(ticket)) activeRead.current = null;
+      if (pageOwner.current === ticket) {
+        pageOwner.current = null;
+        if (mounted.current) setBusy((previous) => applying.current || pageOwner.current !== null ? previous : false);
+      }
+    }
+  }
 
   async function lookup() {
-    if (!email.trim()) return onMsg("Enter an email to look up.");
-    setLooking(true);
-    setFound(null);
+    if (!mounted.current || applying.current || pageOwner.current !== null) return;
+    const input = emailInput.current.trim();
+    const { ticket, signal } = beginRead();
+    publishFound(ticket, null);
+    if (!input) {
+      setLooking((previous) => currentRead(ticket) ? false : previous);
+      onMsg("Enter an email to look up.");
+      return;
+    }
+    setLooking((previous) => currentRead(ticket) ? true : previous);
     try {
-      const r = await fetch(`/api/controller/user?email=${encodeURIComponent(email.trim())}`);
+      const r = await fetch(`/api/controller/user?email=${encodeURIComponent(input)}`, { signal });
       const d = await r.json();
+      if (!currentRead(ticket)) return;
       if (!r.ok) throw new Error(d.error || "not found");
-      setFound(d);
+      publishFound(ticket, d, input);
     } catch (e) {
-      onMsg(e instanceof Error ? e.message : "Lookup failed.");
+      if (currentRead(ticket)) onMsg(e instanceof Error ? e.message : "Lookup failed.");
     } finally {
-      setLooking(false);
+      if (currentRead(ticket)) activeRead.current = null;
+      setLooking((previous) => currentRead(ticket) ? false : previous);
     }
   }
 
   async function apply() {
-    if (!found) return;
+    const target = selected.current;
+    if (!mounted.current || !target || applying.current || pageOwner.current !== null ||
+        selectedInput.current !== emailInput.current.trim()) return;
     // Whole numbers only: a fraction would leave a wallet holding part of a coin.
     const coinsDelta = Number(coins.trim() || "0");
     const energyDelta = Number(energy.trim() || "0");
     if (!Number.isInteger(coinsDelta) || !Number.isInteger(energyDelta)) {
       return onMsg("Deltas must be whole numbers.");
     }
+    if (Math.abs(coinsDelta) > 100000 || Math.abs(energyDelta) > 100000) return onMsg("Each adjustment must be between -100000 and 100000.");
     if (coinsDelta === 0 && energyDelta === 0) return onMsg("Nothing to adjust.");
-    // This changes a real wallet: say exactly what will happen first.
     const plan = [coinsDelta && `${coinsDelta > 0 ? "+" : ""}${coinsDelta} coins`, energyDelta && `${energyDelta > 0 ? "+" : ""}${energyDelta} energy`]
-      .filter(Boolean)
-      .join(" and ");
-    if (!window.confirm(`Apply ${plan} to ${found.email}? Energy stops at ${found.energy_cap}, coins at 0.`)) return;
-    setBusy(true);
+      .filter(Boolean).join(" and ");
+    if (!window.confirm(`Apply ${plan} to ${target.email}? Energy stops at ${target.energy_cap}, coins at 0.`)) return;
+    if (selected.current !== target || selectedInput.current !== emailInput.current.trim()) return;
     try {
-      const r = await fetch("/api/controller/energy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: found.user_id,
-          coins_delta: coinsDelta,
-          energy_delta: energyDelta,
-          ...(note.trim() ? { note: note.trim() } : {}),
-        }),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "failed");
-      setFound({ ...found, coins: d.coins, energy: d.energy, has_wallet: true });
-      setCoins("0");
-      setEnergy("0");
-      setNote("");
-      onMsg("Balance adjusted.");
-      onDone();
-    } catch (e) {
-      onMsg(e instanceof Error ? e.message : "Failed to adjust.");
-    } finally {
-      setBusy(false);
-    }
+      const saved = localStorage.getItem(PENDING_ADJUSTMENT);
+      if (saved) { setPending(JSON.parse(saved) as Adjustment); return onMsg("Resolve the saved adjustment before starting another."); }
+      await submit({ request_id: crypto.randomUUID(), user_id: target.user_id,
+        coins_delta: coinsDelta, energy_delta: energyDelta, ...(note.trim() ? { note: note.trim() } : {}) });
+    } catch { if (mounted.current) onMsg("Browser storage is unavailable. No adjustment sent."); }
   }
 
   return (
     <section className="module" style={{ marginTop: 14 }}>
       <p className="num">USER LOOKUP · ADJUST</p>
+      {pending && <div data-testid="wallet-pending" role="status" className="module" style={{ marginTop: 12, overflowWrap: "anywhere" }}>
+        <p>Unconfirmed adjustment for account {pending.user_id}: {pending.coins_delta} coins, {pending.energy_delta} energy.
+          Retry this saved request before starting another; it may already have succeeded.</p>
+        <button data-testid="wallet-retry" className="btn" disabled={busy} onClick={() => submit(pending)}>Retry saved adjustment</button>
+      </div>}
       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
         <input
+          data-testid="wallet-email"
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={(e) => changeEmail(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") lookup();
           }}
@@ -656,14 +851,14 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
           className={inputCls}
           style={{ flex: 1, minWidth: 200 }}
         />
-        <button onClick={lookup} disabled={looking} className="btn">
+        <button data-testid="wallet-lookup" onClick={lookup} disabled={looking || busy} className="btn">
           {looking ? "…" : "Look up"}
         </button>
       </div>
 
       {found && (
         <>
-          <div className="module" style={{ background: "#fff", marginTop: 12 }}>
+          <div data-testid="wallet-result" data-user-id={found.user_id} className="module" style={{ background: "#fff", marginTop: 12 }}>
             <div className="mono" style={{ fontSize: ".72rem", color: "var(--slate)" }}>
               {found.email}
               {found.username ? ` · ${found.username}` : ""}
@@ -694,14 +889,28 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
             </div>
           </div>
 
+          {found.coin_details?.enabled && <div className="module" style={{ marginTop: 12 }}>
+            <p className="num">COIN EXPIRY</p>
+            <p>{found.coin_details.non_expiring_coins} coins never expire.</p>
+            {found.coin_details.next_expiry_at && <p>{found.coin_details.next_expiry_coins} coins next expire {fmtDate(found.coin_details.next_expiry_at)} (local time).</p>}
+            <p>New credits expire six calendar months after Server credit time. Earliest expiry is spent first; old balances remain non-expiring.</p>
+            <p>Last checked {fmtDate(found.coin_details.server_time)}. Refresh lookup for current balances.</p>
+            <details><summary>Credit batches</summary>
+              {found.coin_details.rows.map((batch) => <div key={batch.id} style={{ borderTop: "1px solid var(--slate)", padding: "10px 0" }}>
+                <p>{batch.remaining} of {batch.amount} coins remaining · {batch.source}</p>
+                <p>Credited {fmtDate(batch.credited_at)}<br />{batch.expires_at ? `Expiry ${fmtDate(batch.expires_at)}` : "Never expires"} (local time)</p>
+              </div>)}
+              {found.coin_details.next_cursor && <button data-testid="wallet-more-batches" className="btn" onClick={moreBatches} disabled={busy}>Load more batches</button>}
+            </details>
+          </div>}
           <div className="grid g2" style={{ marginTop: 12 }}>
             <label>
               <span className="mono-label">Coins delta (+/-)</span>
-              <input value={coins} onChange={(e) => setCoins(e.target.value)} className={inputCls} />
+              <input data-testid="wallet-coins" value={coins} onChange={(e) => setCoins(e.target.value)} className={inputCls} />
             </label>
             <label>
               <span className="mono-label">Energy delta (+/-)</span>
-              <input value={energy} onChange={(e) => setEnergy(e.target.value)} className={inputCls} />
+              <input data-testid="wallet-energy" value={energy} onChange={(e) => setEnergy(e.target.value)} className={inputCls} />
             </label>
           </div>
           <label style={{ display: "block", marginTop: 12 }}>
@@ -714,7 +923,7 @@ function EnergyAdjust({ onMsg, onDone }: { onMsg: (m: string) => void; onDone: (
               className={inputCls}
             />
           </label>
-          <button onClick={apply} disabled={busy} className="btn-signal" style={{ marginTop: 14 }}>
+          <button data-testid="wallet-apply" onClick={apply} disabled={busy || looking || pending !== null} className="btn-signal" style={{ marginTop: 14 }}>
             {busy ? "Applying…" : "Apply adjustment"}
           </button>
         </>

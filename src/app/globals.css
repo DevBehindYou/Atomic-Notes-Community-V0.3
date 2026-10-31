@@ -1,6 +1,11 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@layer theme, base;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+@config "../../tailwind.config.ts";
+
+/* Keep utilities and existing custom rules in the same cascade layer, as in
+   Tailwind 3. Class utilities must still override element defaults below. */
 
 :root {
   --ink: #15171b;

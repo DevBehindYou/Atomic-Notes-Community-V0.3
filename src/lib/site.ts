@@ -15,5 +15,8 @@ function originOf(value: string | undefined, fallback: string): string {
 /** Canonical origin for metadata, sitemap and feed links. No trailing slash. */
 export const SITE_URL = originOf(process.env.NEXT_PUBLIC_SITE_URL, DEFAULT_SITE_URL);
 
+/** The developer's own site, used for author links and structured data. */
+export const DEVELOPER_URL = "https://devbehindyou.com";
+
 /** Where the download buttons point. */
 export const APK_URL = process.env.NEXT_PUBLIC_APK_URL || DEFAULT_APK_URL;

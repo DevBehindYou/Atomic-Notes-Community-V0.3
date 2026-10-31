@@ -1,7 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Bebas_Neue, Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
-import { SITE_URL } from "@/lib/site";
+import { DEVELOPER_URL, SITE_URL } from "@/lib/site";
+import { FEED_ALTERNATE } from "@/lib/seo";
 
 const bebas = Bebas_Neue({
   weight: "400",
@@ -18,29 +19,31 @@ const mono = JetBrains_Mono({
 });
 
 const DESCRIPTION =
-  "Atomic Notes is a free, local-first notes app for Android. Notes sync to your own Google Drive, with an optional AES-256-GCM vault. No AI, no ads, no trackers.";
+  "Atomic Notes is a private, offline-first Android notes app with Google Drive sync, an optional E2E encrypted vault, and no ads or tracking.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: "Atomic Notes: local-first notes that sync to your own Google Drive",
+    default: "Atomic Notes: Offline, E2E Vault & Google Drive Sync",
     template: "%s | Atomic Notes",
   },
   description: DESCRIPTION,
   applicationName: "Atomic Notes",
-  authors: [{ name: "Ashutosh Sharma (DevBehindYou)", url: "https://devbehindyou.vercel.app" }],
+  authors: [{ name: "Ashutosh Sharma (DevBehindYou)", url: DEVELOPER_URL }],
   creator: "DevBehindYou",
   keywords: [
-    "Atomic Notes",
-    "local-first notes app",
-    "private notes app Android",
-    "Google Drive notes app",
-    "end-to-end encrypted notes",
-    "notes app without AI",
-    "offline notes app",
-    "privacy-first notes app",
+    "Atomic Notes app",
+    "notes app for Android",
+    "Google Drive notes sync",
+    "encrypted note taking app",
+    "notes app without ads",
+    "notes app with password",
+    "Atomic Notes by DevBehindYou",
   ],
-  alternates: { canonical: "/" },
+  alternates: {
+    canonical: "/",
+    types: FEED_ALTERNATE,
+  },
   icons: { icon: "/icon.png", apple: "/icon.png" },
   openGraph: {
     type: "website",
@@ -71,7 +74,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${bebas.variable} ${hanken.variable} ${mono.variable}`}>
+    <html lang="en-US" className={`${bebas.variable} ${hanken.variable} ${mono.variable}`}>
       <body className="font-body antialiased">{children}</body>
     </html>
   );

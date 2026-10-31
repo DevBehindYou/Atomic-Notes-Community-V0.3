@@ -15,8 +15,15 @@ export async function POST(req: Request) {
   if (!b?.email && !b?.user_id) {
     return NextResponse.json({ error: "email or user_id is required" }, { status: 400 });
   }
+  if (typeof b.request_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(b.request_id)) {
+    return NextResponse.json({ error: "request_id UUID is required" }, { status: 400 });
+  }
   try {
+    if ((await atomicAdmin.health()).coin_request_replay !== true) {
+      return NextResponse.json({ error: "coin_replay_unavailable" }, { status: 409 });
+    }
     const result = await atomicAdmin.adjustEnergy({
+      request_id: b.request_id,
       email: b.email,
       user_id: b.user_id,
       coins_delta: Number(b.coins_delta ?? 0),

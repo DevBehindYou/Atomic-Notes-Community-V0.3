@@ -1,12 +1,17 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import { LegalPage } from "@/components/LegalPage";
 import { REPO_URL } from "@/lib/content";
+import { pageMetadata } from "@/lib/seo";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Terms of Service",
-  description: "The terms for using the Atomic Notes app, its sync service, Atomic Energy and Atomic Coins.",
-  alternates: { canonical: "/terms" },
+  description: "The terms for using the Atomic Notes app, its sync service, Atomic Energy, and Atomic Coins.",
+  path: "/terms",
+});
+
+export const viewport: Viewport = {
+  themeColor: "#15171B",
 };
 
 export default function TermsPage() {

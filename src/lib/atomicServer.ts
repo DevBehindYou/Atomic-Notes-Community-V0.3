@@ -54,18 +54,22 @@ async function request<T>(
 }
 
 export const atomicAdmin = {
-  health: () => request<{ db: boolean; dbError: string | null; time: string }>("/health"),
+  health: () => request<{ db: boolean; dbError: string | null; time: string; coin_request_replay?: boolean }>("/health"),
   stats: () => request<{ stats: Record<string, unknown> }>("/stats"),
   user: (email: string) =>
     request<Record<string, unknown>>(`/user?email=${encodeURIComponent(email)}`),
+  coinBatches: (userId: string, cursor?: string) => request<Record<string, unknown>>(`/coins?user_id=${encodeURIComponent(userId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   adjustEnergy: (body: {
+    request_id?: string;
     email?: string;
     user_id?: string;
     coins_delta?: number;
     energy_delta?: number;
     note?: string;
   }) => request<{ ok: true; user_id: string; coins: number; energy: number }>("/energy", { method: "POST", body }),
-  listNotifications: () => request<{ rows: unknown[] }>("/notifications"),
+  listNotifications: (limit = 50, cursor?: string) =>
+    request<{ rows: unknown[]; next_cursor?: string | null }>(
+      `/notifications?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   createNotification: (body: Record<string, unknown>) =>
     request<{ row: unknown; audience_size?: number }>("/notifications", { method: "POST", body }),
   updateNotification: (body: Record<string, unknown>) =>
