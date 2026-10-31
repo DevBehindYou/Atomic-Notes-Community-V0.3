@@ -7,12 +7,25 @@ import { Icon } from "./Chrome";
 const STOP = new Set(["the", "and", "can", "does", "what", "how", "are", "you", "for", "with", "that", "this", "its", "any", "about", "your", "my", "is", "do", "if", "i"]);
 const MAX = 300;
 
-type Reply = { state: "idle" } | { state: "asking" } | { state: "answer"; text: string; q: string } | { state: "error"; msg: string };
+type Reply =
+  | { state: "idle" }
+  | { state: "asking" }
+  | { state: "answer"; text: string; q: string; writing: boolean }
+  | { state: "refused"; msg: string }
+  | { state: "error"; msg: string };
+
+/** Models slip into markdown now and then; the answer is shown as plain text, so drop the markers. */
+const plainText = (s: string) =>
+  s
+    .replace(/\*\*|__|`/g, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*•]\s+/gm, "");
 
 /**
  * Ask box. While typing, the closest FAQ answers open by keyword. Submitting sends the question to
- * /api/ask (Ollama Cloud, grounded in the site's facts). If that service is off or fails, the keyword
- * match stays as the answer.
+ * /api/ask (Ollama Cloud, grounded in the site's facts), and the answer appears as the model writes it.
+ * Questions outside Atomic Notes get a short refusal. If the service is off or fails, the keyword match
+ * stays as the answer.
  */
 export function AskFaq() {
   const [ask, setAsk] = useState("");
@@ -43,7 +56,7 @@ export function AskFaq() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     const q = ask.trim();
-    if (q.length < 3 || reply.state === "asking") return;
+    if (q.length < 3 || reply.state === "asking" || (reply.state === "answer" && reply.writing)) return;
     abort.current?.abort();
     const ctrl = new AbortController();
     abort.current = ctrl;
@@ -55,21 +68,45 @@ export function AskFaq() {
         body: JSON.stringify({ question: q }),
         signal: ctrl.signal,
       });
-      const data = (await res.json().catch(() => ({}))) as { answer?: string; error?: string };
-      if (res.ok && data.answer) setReply({ state: "answer", text: data.answer, q });
-      else setReply({ state: "error", msg: data.error || "No answer right now." });
+      if (!res.ok || !res.body) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setReply({ state: "error", msg: data.error || "No answer right now." });
+        return;
+      }
+      if (res.headers.get("X-Ask") === "refused") {
+        setReply({ state: "refused", msg: (await res.text()).trim() });
+        return;
+      }
+      // the answer arrives in pieces as the model writes it
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        setReply({ state: "answer", text: plainText(text), q, writing: true });
+      }
+      text = plainText(text + decoder.decode()).trim();
+      if (text) setReply({ state: "answer", text, q, writing: false });
+      else setReply({ state: "error", msg: "No answer came back. Try rephrasing." });
     } catch (err) {
       if ((err as Error).name !== "AbortError") setReply({ state: "error", msg: "Couldn't reach the answer service." });
     }
   }
 
   const q = ask.trim();
+  const writing = reply.state === "asking" || (reply.state === "answer" && reply.writing);
   const note =
     reply.state === "asking"
       ? "Thinking…"
       : reply.state === "answer"
-        ? "Answered below. The closest answer from this page is open too."
-        : reply.state === "error"
+        ? reply.writing
+          ? "Writing an answer…"
+          : "Answered below. The closest answer from this page is open too."
+        : reply.state === "refused"
+          ? reply.msg
+          : reply.state === "error"
         ? `${reply.msg} The closest answers from this page are below.`
         : !q
           ? "Press Enter to ask. Answers use only the facts on this site and never see your notes."
@@ -92,10 +129,10 @@ export function AskFaq() {
           autoComplete="off"
           onChange={(e) => {
             setAsk(e.target.value);
-            if (reply.state !== "asking") setReply({ state: "idle" });
+            if (!writing) setReply({ state: "idle" });
           }}
         />
-        <button type="submit" className="rv-send rv-ask-send" aria-label="Ask" disabled={q.length < 3 || reply.state === "asking"}>
+        <button type="submit" className="rv-send rv-ask-send" aria-label="Ask" disabled={q.length < 3 || writing}>
           <Icon name="up" color="#FFFFFF" size={18} />
         </button>
       </form>
@@ -104,9 +141,11 @@ export function AskFaq() {
       </p>
 
       {reply.state === "answer" && (
-        <div className="rv-answer" aria-live="polite">
+        <div className="rv-answer" aria-live="polite" aria-busy={reply.writing}>
           <p className="rv-tag">Answer to: {reply.q}</p>
-          <p className="rv-answer-text">{reply.text}</p>
+          <p className="rv-answer-text" data-writing={reply.writing}>
+            {reply.text}
+          </p>
           <p className="rv-muted" style={{ fontSize: 12 }}>
             Written by an AI model from this site&apos;s facts. It can be wrong: the FAQ below is the source.
           </p>

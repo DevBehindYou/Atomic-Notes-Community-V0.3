@@ -1407,6 +1407,22 @@ html:has(.rv) body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* a caret at the end of the answer while the model is still writing it */
+.rv .rv-answer-text[data-writing="true"]::after {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--rv-signal-light);
+  animation: rv-caret 0.9s steps(1) infinite;
+}
+@keyframes rv-caret {
+  50% {
+    opacity: 0;
+  }
+}
 .rv .rv-faq-q {
   all: unset;
   box-sizing: border-box;
