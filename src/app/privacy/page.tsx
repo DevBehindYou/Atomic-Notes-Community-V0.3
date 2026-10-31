@@ -1,12 +1,17 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { LegalPage } from "@/components/LegalPage";
 import { REPO_URL } from "@/lib/content";
+import { pageMetadata } from "@/lib/seo";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Privacy Policy",
   description:
     "How Atomic Notes handles your data: what the app and server keep, how Google user data is used, the end-to-end vault, retention, and your choices.",
-  alternates: { canonical: "/privacy" },
+  path: "/privacy",
+});
+
+export const viewport: Viewport = {
+  themeColor: "#15171B",
 };
 
 const CONTACT = "https://github.com/DevBehindYou";

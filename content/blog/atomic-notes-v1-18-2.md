@@ -11,15 +11,15 @@ tags: ["release-notes", "atomic-energy", "demo-build"]
 featured: true
 draft: false
 coverImage: "/og-banner.png"
-coverAlt: "Atomic Notes release cover with the atom mark on a paper background"
-canonical: "https://atomic-notes-community.vercel.app/blog/atomic-notes-v1-18-2"
+coverAlt: "Atomic Notes banner with three phone screens: the encryption vault, the notes grid, and Atomic Energy"
+canonical: "https://atomic-notes.devbehindyou.com/blog/atomic-notes-v1-18-2"
 keywords: "atomic notes, release notes, local-first notes, atomic energy, demo build"
 readingTime: "3 min read"
 ---
 
 **Key Takeaway:** Atomic Notes v1.18.2 is a demo build. It adds the Atomic Energy economy, in-app email verification and password reset, an in-app notification center, and a fix so the app opens offline. Coin purchases are not live yet.
 
-Version 1.18.2 is a demo build, not a store release. The theme is making the parts around your notes feel finished: energy that governs cloud sync, email flows that work inside the app, and a notification center. Local note-taking stays instant and free, online or off. Here is what changed, and what is still ahead.
+Version 1.18.2 is a demo build, not a store release. The theme is making the parts around your notes feel finished: energy that governs cloud sync, email flows that work inside the app, and a notification center. Local note-taking stays instant and free, online or off. Here is what changed and what is still ahead.
 
 ## What shipped
 
@@ -31,7 +31,7 @@ This build adds the Atomic Energy system, in-app OTP email, energy-gated cloud s
 - Notification center: a feed of announcements, with pinned and targeted notices.
 - A one-time tour that explains energy, coins, and the long-press sync popup.
 
-## What did the offline fix change
+## What did the offline fix change?
 
 The headline fix is offline launch. The app now opens without a network, every time.
 
@@ -45,12 +45,12 @@ This is a demo build, so some parts are intentionally not live.
 - The hourly sync runs while the app is open, not as a true background job.
 - Some flows still need testing on physical devices.
 
-## How do I get the build
+## How do I get the build?
 
 Sideload the signed APK from GitHub Releases. On most phones, use the arm64 build.
 
-Download the latest build from [GitHub Releases](https://github.com/DevBehindYou/Atomic-Notes-App-V0.2/releases). For how the economy works, read the [Atomic Energy guide](/blog).
+Download the latest build from [GitHub Releases](https://github.com/DevBehindYou/Atomic-Notes-App-V0.2/releases). For how the economy works, see [Atomic Energy](/#energy) on the home page.
 
-## What is next
+## What's next
 
 Payments and a wider launch are the next planned milestones. Coin purchases come first, then a broader release. Both are planned, not shipped. Follow the updates for progress.

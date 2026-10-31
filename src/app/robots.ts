@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { SITE_URL } from "@/lib/site";
 
 export default function robots(): MetadataRoute.Robots {
   return {
@@ -9,5 +10,7 @@ export default function robots(): MetadataRoute.Robots {
       // of search results by its noindex header and meta tag instead.
       disallow: ["/api/"],
     },
+    sitemap: `${SITE_URL}/sitemap.xml`,
+    host: SITE_URL,
   };
 }

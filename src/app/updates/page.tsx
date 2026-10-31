@@ -1,101 +1,137 @@
-import type { Metadata } from "next";
-import { SiteNav } from "@/components/SiteNav";
-import { SiteFooter } from "@/components/SiteFooter";
+import type { Metadata, Viewport } from "next";
+import Link from "next/link";
+import "../revamp.css";
+import { Dock, RvFooter } from "@/components/rv/Chrome";
+import { UpdatesFeed } from "@/components/rv/UpdatesFeed";
 import { fetchActiveNotifications } from "@/lib/atomicServer";
-import type { NotificationRow } from "@/lib/content";
+import { RELEASE, ROADMAP, type NotificationRow } from "@/lib/content";
+import { APK_URL } from "@/lib/site";
+import { pageMetadata } from "@/lib/seo";
 
 export const dynamic = "force-dynamic";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Updates and status",
   description:
-    "Live release notes, maintenance notices and service status for Atomic Notes. The same messages appear in the app's notification center.",
-  alternates: { canonical: "/updates" },
+    "Live release notes, maintenance notices, and service status for Atomic Notes. The same messages appear in the app's notification center.",
+  path: "/updates",
+});
+
+export const viewport: Viewport = {
+  themeColor: "#15171B",
 };
 
 async function getActive(): Promise<{ rows: NotificationRow[]; error: string | null }> {
   try {
     const rows = (await fetchActiveNotifications()) as NotificationRow[];
-    // Priority order: critical, high, normal, low. (Expiry is already
-    // filtered server-side — see the Server's routes/public.ts.)
+    // Priority order: critical, high, normal, low. (Expiry is already filtered server-side.)
     const rank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
     rows.sort((a, b) => rank[a.priority] - rank[b.priority]);
     return { rows, error: null };
-  } catch (e) {
+  } catch {
     return { rows: [], error: "Could not load updates right now." };
   }
 }
 
-function priorityBorder(p: NotificationRow["priority"]): string {
-  switch (p) {
-    case "critical":
-      return "border-l-4 border-l-[#BA1A1A]";
-    case "high":
-      return "border-l-4 border-l-high";
-    case "normal":
-      return "border-l-4 border-l-signal";
-    default:
-      return "border-l-4 border-l-line";
-  }
-}
-
-function fmt(d: string): string {
-  const dt = new Date(d);
-  return dt.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+const INCIDENT_TYPES = new Set(["server_down", "maintenance", "security"]);
 
 export default async function UpdatesPage() {
   const { rows, error } = await getActive();
+  const incidents = rows.filter((r) => INCIDENT_TYPES.has(r.type));
+  const status: { tone: "ok" | "warn" | "unknown"; text: string } = error
+    ? { tone: "unknown", text: "Status unavailable. The update feed could not be reached." }
+    : incidents.length
+      ? { tone: "warn", text: `${incidents.length} active ${incidents.length === 1 ? "notice" : "notices"} about the service.` }
+      : { tone: "ok", text: "No active incidents or maintenance." };
 
   return (
-    <main className="min-h-screen">
-      <SiteNav current="updates" />
+    <div className="rv">
+      <Dock current="updates" />
+      <main>
+        <section className="rv-blog-hero" aria-labelledby="updates-title">
+          <div className="rv-stars" aria-hidden="true" />
+          <div className="rv-wrap rv-blog-head">
+            <div style={{ minWidth: 0 }}>
+              <p className="rv-num">Notification center</p>
+              <h1 id="updates-title" className="rv-poster" style={{ fontSize: "clamp(56px, 7vw, 104px)", lineHeight: 0.9 }}>
+                Updates <span className="rv-accent">&amp; status.</span>
+              </h1>
+              <p className="rv-lede" style={{ marginTop: 18 }}>
+                Server incidents, releases, maintenance and announcements. The same feed appears in the app&apos;s bell.
+              </p>
+              <p className="rv-status-line" data-tone={status.tone} role="status">
+                <span className="rv-status-dot" aria-hidden="true" />
+                {status.text}
+              </p>
+            </div>
+            <div className="rv-paper-card rv-blog-mascot">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/revamp/mascots/rocco-retry.webp" alt="Rocco, a pixel mascot, retrying a sync" width={480} height={480} />
+            </div>
+          </div>
+        </section>
 
-      <section className="mx-auto max-w-3xl px-5 py-10">
-        <p className="mono-label text-signal">NOTIFICATION CENTER</p>
-        <h1 className="font-display mt-2 text-5xl">Updates & status.</h1>
-        <p className="mt-3 text-slate">
-          Server incidents, releases, maintenance, and announcements. The same
-          feed appears in the app.
-        </p>
-
-        <div className="mt-8 space-y-3">
-          {error && <div className="module p-5 text-slate">{error}</div>}
-          {!error && rows.length === 0 && (
-            <div className="module p-5 text-slate">No active updates right now.</div>
-          )}
-          {rows.map((n) => (
-            <article key={n.id} className={"module p-5 " + priorityBorder(n.priority)}>
-              <div className="flex items-center gap-3">
-                <span className="mono-label text-signal">
-                  {n.type.replace(/_/g, " ")}
-                </span>
-                <span className="mono-label">· {n.priority}</span>
-                <span className="mono-label ml-auto">{fmt(n.created_at)}</span>
-              </div>
-              <h2 className="font-display mt-2 text-2xl">{n.subject}</h2>
-              <p className="mt-2 text-slate">{n.description}</p>
-              {n.action && n.action_url && (
-                <a
-                  href={n.action_url}
-                  className="ghost-btn mt-4"
-                  target={n.action_url.startsWith("http") ? "_blank" : undefined}
-                  rel="noreferrer"
-                >
-                  {n.action}
-                </a>
+        <section className="rv-sec" aria-label="Active updates" style={{ paddingTop: 24 }}>
+          <div className="rv-wrap rv-updates-layout">
+            <div style={{ minWidth: 0 }}>
+              <h2 className="rv-h2" style={{ fontSize: "clamp(26px, 2.6vw, 34px)", marginBottom: 20 }}>
+                Active now.
+              </h2>
+              {error && (
+                <div className="rv-shelf-empty">
+                  <p>{error} The app keeps working offline; check back in a minute.</p>
+                </div>
               )}
-            </article>
-          ))}
-        </div>
-      </section>
-      <SiteFooter />
-    </main>
+              {!error && rows.length === 0 && (
+                <div className="rv-shelf-empty">
+                  <p>No active updates right now.</p>
+                </div>
+              )}
+              {rows.length > 0 && <UpdatesFeed rows={rows} />}
+            </div>
+
+            <aside className="rv-updates-side" aria-label="Releases and roadmap">
+              <div className="rv-panel" style={{ padding: 22 }}>
+                <p className="rv-num" style={{ marginBottom: 8 }}>
+                  Latest release
+                </p>
+                <p className="rv-poster" style={{ fontSize: 44, lineHeight: 0.9 }}>
+                  {RELEASE.version}
+                </p>
+                <p className="rv-muted" style={{ fontSize: 14, marginTop: 8 }}>
+                  Released {RELEASE.date}. {RELEASE.minAndroid} or newer.
+                </p>
+                <div className="rv-btns" style={{ marginTop: 16 }}>
+                  <a href={APK_URL} className="rv-pill rv-pill-solid">
+                    Download
+                  </a>
+                  <Link href="/blog" className="rv-pill">
+                    Release notes
+                  </Link>
+                </div>
+              </div>
+              <div className="rv-panel" style={{ padding: 22 }}>
+                <p className="rv-num" style={{ marginBottom: 12 }}>
+                  Roadmap
+                </p>
+                <ol className="rv-roadmap">
+                  {ROADMAP.map((r) => (
+                    <li key={r.phase} data-state={r.state}>
+                      <span className="rv-roadmap-dot" aria-hidden="true" />
+                      <span>{r.title}</span>
+                      <span className="rv-roadmap-tag">{r.state === "done" ? "Shipped" : r.state === "now" ? "Now" : "Next"}</span>
+                    </li>
+                  ))}
+                </ol>
+                <p className="rv-muted" style={{ fontSize: 13, marginTop: 14 }}>
+                  Not on the roadmap: AI features and paid subscriptions.
+                </p>
+              </div>
+            </aside>
+          </div>
+        </section>
+      </main>
+      <RvFooter />
+    </div>
   );
 }
